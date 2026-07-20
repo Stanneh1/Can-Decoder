@@ -268,6 +268,19 @@ void setup() {
   startTwaiChannel(1, CH1_TX, CH1_RX);
   startTwaiChannel(2, CH2_TX, CH2_RX);
 
+  // --- NEW ACTIVE VEHICLE IDENTIFICATION STAGE ---
+Serial.println("[SYSTEM] Interrogating Powertrain Bus for Vehicle Identification...");
+char global_vin[18] = {0};
+if (requestVehicleVIN(global_vin, sizeof(global_vin))) {
+    Serial.print("[SYSTEM] SUCCESS! Detected Car VIN: ");
+    Serial.println(global_vin);
+    
+    // Future Expansion Spot:
+    // if (global_vin[3] == 'F') { ... set screen layout for S3 8V ... }
+} else {
+    Serial.println("[SYSTEM] WARNING: VIN query timed out. Defaulting to generic layout profiles.");
+}
+
   // 2b. ACTIVATE ASYNCHRONOUS COCKPIT HOTSPOT AP NETWORK
   WiFi.softAP(ap_ssid, ap_password);
   Serial.print("Access Point Launched. Connect to: "); Serial.println(ap_ssid);
@@ -519,9 +532,6 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventTyp
   }
 }
 
-
-
-
 // -------------------------------------------------------------
 // EVENT CALLBACK REGISTER PATHS
 // -------------------------------------------------------------
@@ -530,11 +540,81 @@ static void handleBoostResetTouch(lv_event_t * e) {
   Serial.println("[UI EVENT] Historical Peak Boost memory register zeroed out.");
 }
 
+// --- ACTIVE UDS DIAGNOSTIC VIN EXTRACTION ---
+bool requestVehicleVIN(char* vinBuffer, size_t bufferSize) {
+    if (bufferSize < 18) return false; // VIN is strictly 17 characters + null terminator
+    
+    twai_message_t tx_msg;
+    tx_msg.identifier = 0x7E0;  // Standard Engine ECU Diagnostic Request ID
+    tx_msg.extd = 0;
+    tx_msg.rtr = 0;
+    tx_msg.data_length_code = 8;
+    
+    // ISO-TP Single Frame: 3 bytes payload follow (Service 0x22, DID 0xF190)
+    tx_msg.data[0] = 0x03; 
+    tx_msg.data[1] = 0x22; 
+    tx_msg.data[2] = 0xF1; 
+    tx_msg.data[3] = 0x90; 
+    for(int i=4; i<8; i++) tx_msg.data[i] = 0xAA; // Padding
+
+    // Fire request out on Channel 0 (Drive Train Bus)
+    if (twai_transmit_v2(twai_ports[0], &tx_msg, pdMS_TO_TICKS(100)) != ESP_OK) {
+        Serial.println("[VIN DETECT] Failed to transmit diagnostic query frame.");
+        return false;
+    }
+
+    twai_message_t rx_msg;
+    uint32_t startTime = millis();
+    int charsCollected = 0;
+    bool flowControlSent = false;
+
+    // Await multi-frame response payload block (1.5-second timeout gate)
+    while (millis() - startTime < 1500 && charsCollected < 17) {
+        if (twai_receive_v2(twai_ports[0], &rx_msg, pdMS_TO_TICKS(10)) == ESP_OK) {
+            if (rx_msg.identifier == 0x7E8) { // Engine ECU Diagnostic Response
+                
+                // Case A: ISO-TP First Frame (0x10) - Indicates data payload is splitting up
+                if ((rx_msg.data[0] & 0xF0) == 0x10) {
+                    // Extract initial string segment bytes safely starting at index 5
+                    vinBuffer[0] = rx_msg.data[5]; // Stores 'W' (or 'T')
+                    vinBuffer[1] = rx_msg.data[6]; // Stores 'A' (or 'R')
+                    vinBuffer[2] = rx_msg.data[7]; // Stores 'U'
+                    charsCollected = 3;
+
+                    // Send the Mandatory ISO-TP Flow Control Frame immediately to unlock remaining frames
+                    twai_message_t fc_msg;
+                    fc_msg.identifier = 0x7E0;
+                    fc_msg.extd = 0;
+                    fc_msg.rtr = 0;
+                    fc_msg.data_length_code = 8;
+                    fc_msg.data[0] = 0x30; // Flow Control Clear To Send (CTS)
+                    fc_msg.data[1] = 0x00; // Block Size = 0 (Send all)
+                    fc_msg.data[2] = 0x00; // Separation Time = 0ms (Max Speed)
+                    for(int i=3; i<8; i++) fc_msg.data[i] = 0xAA;
+                    
+                    twai_transmit_v2(twai_ports[0], &fc_msg, pdMS_TO_TICKS(50));
+                    flowControlSent = true;
+                }
+                // Case B: ISO-TP Consecutive Frame (0x21, 0x22, etc.)
+                else if ((rx_msg.data[0] & 0xF0) == 0x20 && flowControlSent) {
+                    for (int i = 1; i < 8 && charsCollected < 17; i++) {
+                        vinBuffer[charsCollected++] = rx_msg.data[i];
+                    }
+                }
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+
+    if (charsCollected == 17) {
+        vinBuffer[17] = '\0'; // Seal string array cleanly
+        return true;
+    }
+    return false;
+}
+
 // -------------------------------------------------------------
 // HARDWARE INITIALIZATION & PRE-FLIGHT TESTERS
-// -------------------------------------------------------------
-// -------------------------------------------------------------
-// HARDWARE INITIALIZATION & PRE-FLIGHT TESTERS (FIXED)
 // -------------------------------------------------------------
 bool runBootDiagnostic(int port_idx, int tx_pin, int rx_pin, const char* label) {
   twai_general_config_t g_cfg = TWAI_GENERAL_CONFIG_DEFAULT((gpio_num_t)tx_pin, (gpio_num_t)rx_pin, TWAI_MODE_NO_ACK);
@@ -685,4 +765,6 @@ void decodeDriveTrain(twai_message_t &msg)
        alarm_sounding = false;
     }
   }
+
+
 }
