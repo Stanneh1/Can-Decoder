@@ -74,7 +74,7 @@ const char index_html[] PROGMEM = R"rawhtml(
     </style>
 </head>
 <body>
-    <h1>AUDI S3 MQB TELEMETRY LINK</h1>
+    <h1 id="car_banner">VAG MQB TELEMETRY LINK</h1>
     <div class="grid">
         <div class="card"><div class="label">Engine Speed</div><div id="rpm" class="value normal">0</div><div class="label">RPM</div></div>
         <div class="card"><div class="label">Turbo Boost</div><div id="boost" class="value normal">0.00</div><div class="label">Bar</div><button onclick="resetPeak()">Reset Peak (<span id="peak">0.00</span>)</button></div>
@@ -107,6 +107,7 @@ const char index_html[] PROGMEM = R"rawhtml(
         function onMessage(event) {
             try {
                 var data = JSON.parse(event.data);
+                if(data.car) document.getElementById('car_banner').innerText = data.car;
                 document.getElementById('rpm').innerText = data.rpm.toFixed(0);
                 document.getElementById('rpm').className = (data.rpm >= 6500) ? "value redline" : "value normal";
                 document.getElementById('boost').innerText = data.boost.toFixed(2);
@@ -248,6 +249,7 @@ void CockpitCoreProcessor(void *pvParameters) {
         doc["peak"] = s3_live_metrics.peak_boost_bar;
         doc["oil"] = s3_live_metrics.oil_temp;
         doc["h2o"] = s3_live_metrics.coolant_temp;
+        doc["car"] = active_vehicle_profile.model_name;
         
         // FIX: Serialize directly into the fixed character array without dynamic memory growth
         serializeJson(doc, global_ws_buffer, sizeof(global_ws_buffer));
