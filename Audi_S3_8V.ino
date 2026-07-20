@@ -26,10 +26,27 @@
 // --- THREAD-SAFE FIXED CHAR BUFFER ARRAY ---
 static char global_ws_buffer[256]; // Allocates a fixed memory space block
 static volatile bool ws_payload_ready = false;
+
+// --- ADVANCED VEHICLE DECODING BASES ---
+enum MqbPlatformSeries {
+    SERIES_UNKNOWN,
+    SERIES_MQB_A_CLASS,    // Audi A3 8V/GY, Golf Mk7/Mk8, Leon, Octavia, Tiguan Mk2, etc.
+    SERIES_MLB_LONG_CLASS, // Audi A4/A5/A6/A7/A8/Q5/Q7/Q8 Longitudinals (B8, B9, C7, C8)
+    SERIES_PQ35_46_LEGACY, // Golf Mk5/Mk6, Audi A3 8P, Passat B6/B7, Scirocco
+    SERIES_SMALL_PO_SKODA  // Polo, Ibiza, Fabia, Audi A1
+};
+
+struct DecodedVehicleMetrics {
+    const char* brand = "VAG MOTOR CORP";
+    const char* model_name = "GENERIC MODEL ARCHITECTURE";
+    const char* electrical_bus = "STANDARD INFRASTRUCTURE CAN";
+    int production_year = 0;
+    MqbPlatformSeries network_generation = SERIES_UNKNOWN;
+} active_vehicle_profile;
+
 // --- WI-FI ACCESS POINT CREDENTIALS ---
 const char* ap_ssid = "Audi_S3_Telemetry";
-const char* ap_password = "VAG_PERFORMANCE";
-
+const char* ap_password = "Password123";
 // Network Web Interface Handles
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
@@ -269,22 +286,23 @@ void setup() {
   startTwaiChannel(2, CH2_TX, CH2_RX);
 
   // --- NEW ACTIVE VEHICLE IDENTIFICATION STAGE ---
-Serial.println("[SYSTEM] Interrogating Powertrain Bus for Vehicle Identification...");
-char global_vin[18] = {0};
-if (requestVehicleVIN(global_vin, sizeof(global_vin))) {
-    Serial.print("[SYSTEM] SUCCESS! Detected Car VIN: ");
-    Serial.println(global_vin);
-    
-    // Future Expansion Spot:
-    // if (global_vin[3] == 'F') { ... set screen layout for S3 8V ... }
-} else {
-    Serial.println("[SYSTEM] WARNING: VIN query timed out. Defaulting to generic layout profiles.");
-}
+    Serial.println("[SYSTEM] Interrogating Powertrain Bus for Vehicle Identification...");
+  char global_vin[18] = { 0 };
+  if (requestVehicleVIN(global_vin, sizeof(global_vin))) {
+      Serial.print("[SYSTEM] SUCCESS! Detected Car VIN: ");
+      Serial.println(global_vin);
+      
+      // Call the dynamic parsing matrix safely
+      decodeAndPrintVehicleIdentity(global_vin);
+  } else {
+      Serial.println("[SYSTEM] WARNING: VIN query timed out. Defaulting to generic layout profiles.");
+  }
+
 
   // 2b. ACTIVATE ASYNCHRONOUS COCKPIT HOTSPOT AP NETWORK
   WiFi.softAP(ap_ssid, ap_password);
   Serial.print("Access Point Launched. Connect to: "); Serial.println(ap_ssid);
-  Serial.print("Dashboard Web URL Address: http://"); Serial.println(WiFi.softAPIP());
+  Serial.print("Dashboard Web URL Address: http://");  Serial.println(WiFi.softAPIP());
 
   // Bind and Link Web Server Routes
   ws.onEvent(onWsEvent);
@@ -558,7 +576,7 @@ bool requestVehicleVIN(char* vinBuffer, size_t bufferSize) {
     for(int i=4; i<8; i++) tx_msg.data[i] = 0xAA; // Padding
 
     // Fire request out on Channel 0 (Drive Train Bus)
-    if ( twai_transmit_v2(twai_ports[0], &tx_msg, pdMS_TO_TICKS(100)) != ESP_OK) {
+    if (twai_transmit_v2(twai_ports[0], &tx_msg, pdMS_TO_TICKS(100)) != ESP_OK) {
         Serial.println("[VIN DETECT] Failed to transmit diagnostic query frame.");
         return false;
     }
@@ -608,9 +626,9 @@ bool requestVehicleVIN(char* vinBuffer, size_t bufferSize) {
     }
 
     if (charsCollected == 17) {
-        vinBuffer[17] = '\0'; // Seal string array cleanly
-        return true;
-    }
+      vinBuffer[charsCollected] = '\0'; 
+      return true;
+  }
     return false;
 }
 
@@ -639,7 +657,112 @@ bool runBootDiagnostic(int port_idx, int tx_pin, int rx_pin, const char* label) 
   return (status.state != TWAI_STATE_BUS_OFF);
 }
 
- void startTwaiChannel(int port_idx, int tx_pin, int rx_pin) {
+void decodeAndPrintVehicleIdentity(const char* vin) {
+     if (strlen(vin) < 17) return;
+
+    // 1. EXTRACT WORLD MANUFACTURER IDENTIFIER (WMI)
+    if (strncmp(vin, "WAU", 3) == 0) active_vehicle_profile.brand = "AUDI AG (GERMANY)";
+    else if (strncmp(vin, "TRU", 3) == 0) active_vehicle_profile.brand = "AUDI AG (HUNGARY)";
+    else if (strncmp(vin, "WVW", 3) == 0) active_vehicle_profile.brand = "VOLKSWAGEN CARS";
+    else if (strncmp(vin, "WVG", 3) == 0) active_vehicle_profile.brand = "VOLKSWAGEN SUV DIVISION";
+    else if (strncmp(vin, "VSS", 3) == 0) active_vehicle_profile.brand = "SEAT / CUPRA";
+    else if (strncmp(vin, "TMB", 3) == 0) active_vehicle_profile.brand = "SKODA AUTO";
+    else if (strncmp(vin, "WP0", 3) == 0) active_vehicle_profile.brand = "PORSCHE STUTTGART";
+
+    // 2. DETECT CHASSIS GENERATION CODE (VIN CHARACTER POSITION 7 & 8)
+    char chassis[3] = { vin[6], vin[7], '\0' };
+    active_vehicle_profile.network_generation = SERIES_UNKNOWN; // Reset baseline
+
+    // --- AUDI DIVISION ---
+    if (strcmp(chassis, "8P") == 0) { active_vehicle_profile.model_name = "Audi A3 / S3 (PQ35 Platform)"; active_vehicle_profile.electrical_bus = "CAN-TP2.0 LEGACY"; active_vehicle_profile.network_generation = SERIES_PQ35_46_LEGACY; }
+    else if (strcmp(chassis, "8V") == 0) { active_vehicle_profile.model_name = "Audi A3 / S3 / RS3 (MQB Matrix)"; active_vehicle_profile.electrical_bus = "HIGH-SPEED MQB CAN"; active_vehicle_profile.network_generation = SERIES_MQB_A_CLASS; }
+    else if (strcmp(chassis, "GY") == 0) { active_vehicle_profile.model_name = "Audi A3 / S3 / RS3 (MQB EVO 8Y)"; active_vehicle_profile.electrical_bus = "MQB EVO CAN-FD/CAN"; active_vehicle_profile.network_generation = SERIES_MQB_A_CLASS; }
+    else if (strcmp(chassis, "8K") == 0) { active_vehicle_profile.model_name = "Audi A4 / S4 / RS4 (MLB B8)"; active_vehicle_profile.electrical_bus = "MLB-INFRASTRUCTURE CAN"; active_vehicle_profile.network_generation = SERIES_MLB_LONG_CLASS; }
+    else if (strcmp(chassis, "8W") == 0) { active_vehicle_profile.model_name = "Audi A4 / S4 / A5 / RS5 (MLB B9)"; active_vehicle_profile.electrical_bus = "MLB EVO FLEXRAY/CAN"; active_vehicle_profile.network_generation = SERIES_MLB_LONG_CLASS; }
+    else if (strcmp(chassis, "4F") == 0) { active_vehicle_profile.model_name = "Audi A6 / S6 / RS6 (C6 Era)"; active_vehicle_profile.electrical_bus = "CAN-TP2.0 INFRASTRUCTURE"; active_vehicle_profile.network_generation = SERIES_PQ35_46_LEGACY; }
+    else if (strcmp(chassis, "4G") == 0) { active_vehicle_profile.model_name = "Audi A6 / S6 / A7 / RS7 (MLB C7)"; active_vehicle_profile.electrical_bus = "MLB-INFRASTRUCTURE CAN"; active_vehicle_profile.network_generation = SERIES_MLB_LONG_CLASS; }
+    else if (strcmp(chassis, "4K") == 0) { active_vehicle_profile.model_name = "Audi A6 / A7 / RS6 / RS7 (MLB C8)"; active_vehicle_profile.electrical_bus = "MLB EVO FLEXRAY/CAN"; active_vehicle_profile.network_generation = SERIES_MLB_LONG_CLASS; }
+    else if (strcmp(chassis, "8T") == 0 || strcmp(chassis, "8F") == 0) { active_vehicle_profile.model_name = "Audi A5 / S5 / RS5 (B8 Chassis)"; active_vehicle_profile.electrical_bus = "MLB-INFRASTRUCTURE CAN"; active_vehicle_profile.network_generation = SERIES_MLB_LONG_CLASS; }
+    else if (strcmp(chassis, "4H") == 0) { active_vehicle_profile.model_name = "Audi A8 / S8 (D4 Luxury)"; active_vehicle_profile.electrical_bus = "MLB-INFRASTRUCTURE CAN"; active_vehicle_profile.network_generation = SERIES_MLB_LONG_CLASS; }
+    else if (strcmp(chassis, "4N") == 0) { active_vehicle_profile.model_name = "Audi A8 / S8 (D5 Luxury)"; active_vehicle_profile.electrical_bus = "MLB EVO FLEXRAY/CAN"; active_vehicle_profile.network_generation = SERIES_MLB_LONG_CLASS; }
+    else if (strcmp(chassis, "8U") == 0) { active_vehicle_profile.model_name = "Audi Q3 Compact SUV (PQ35)"; active_vehicle_profile.electrical_bus = "HIGH-SPEED CAN-TP2.0"; active_vehicle_profile.network_generation = SERIES_PQ35_46_LEGACY; }
+    else if (strcmp(chassis, "F3") == 0) { active_vehicle_profile.model_name = "Audi Q3 / RS Q3 (MQB Sport Utility)"; active_vehicle_profile.electrical_bus = "HIGH-SPEED MQB CAN"; active_vehicle_profile.network_generation = SERIES_MQB_A_CLASS; }
+    else if (strcmp(chassis, "8R") == 0) { active_vehicle_profile.model_name = "Audi Q5 Crossover (8R)"; active_vehicle_profile.electrical_bus = "MLB-INFRASTRUCTURE CAN"; active_vehicle_profile.network_generation = SERIES_MLB_LONG_CLASS; }
+    else if (strcmp(chassis, "FY") == 0) { active_vehicle_profile.model_name = "Audi Q5 / SQ5 (MLB FY)"; active_vehicle_profile.electrical_bus = "MLB EVO FLEXRAY/CAN"; active_vehicle_profile.network_generation = SERIES_MLB_LONG_CLASS; }
+    else if (strcmp(chassis, "4M") == 0) { active_vehicle_profile.model_name = "Audi Q7 / SQ7 / Q8 / SQ8 (MLB 4M)"; active_vehicle_profile.electrical_bus = "MLB EVO FLEXRAY/CAN"; active_vehicle_profile.network_generation = SERIES_MLB_LONG_CLASS; }
+    else if (strcmp(chassis, "8J") == 0) { active_vehicle_profile.model_name = "Audi TT / TTS / TT RS (Mk2)"; active_vehicle_profile.electrical_bus = "CAN-TP2.0 MOTORWAY"; active_vehicle_profile.network_generation = SERIES_PQ35_46_LEGACY; }
+    else if (strcmp(chassis, "8S") == 0) { active_vehicle_profile.model_name = "Audi TT / TTS / TT RS (Mk3 MQB)"; active_vehicle_profile.electrical_bus = "HIGH-SPEED MQB CAN"; active_vehicle_profile.network_generation = SERIES_MQB_A_CLASS; }
+    else if (strcmp(chassis, "GA") == 0) { active_vehicle_profile.model_name = "Audi Q2 Compact Crossover"; active_vehicle_profile.electrical_bus = "HIGH-SPEED MQB CAN"; active_vehicle_profile.network_generation = SERIES_MQB_A_CLASS; }
+    else if (strcmp(chassis, "8X") == 0) { active_vehicle_profile.model_name = "Audi A1 Supermini (PQ25)"; active_vehicle_profile.electrical_bus = "CAN-TP2.0 COMPACT"; active_vehicle_profile.network_generation = SERIES_SMALL_PO_SKODA; }
+    else if (strcmp(chassis, "GB") == 0) { active_vehicle_profile.model_name = "Audi A1 Sportback (MQB A0)"; active_vehicle_profile.electrical_bus = "HIGH-SPEED MQB CAN"; active_vehicle_profile.network_generation = SERIES_SMALL_PO_SKODA; }
+
+    // --- VOLKSWAGEN DIVISION ---
+    else if (strcmp(chassis, "1K") == 0 || strcmp(chassis, "5K") == 0 || strcmp(chassis, "AJ") == 0) { active_vehicle_profile.model_name = "VW Golf Mk5 / Mk6 / Jetta"; active_vehicle_profile.electrical_bus = "CAN-TP2.0 POWERTRAIN"; active_vehicle_profile.network_generation = SERIES_PQ35_46_LEGACY; }
+    else if (strcmp(chassis, "5G") == 0 || strcmp(chassis, "BA") == 0 || strcmp(chassis, "AM") == 0) { active_vehicle_profile.model_name = "VW Golf Mk7 / GTI / Golf R (MQB)"; active_vehicle_profile.electrical_bus = "HIGH-SPEED MQB CAN"; active_vehicle_profile.network_generation = SERIES_MQB_A_CLASS; }
+    else if (strcmp(chassis, "CD") == 0) { active_vehicle_profile.model_name = "VW Golf Mk8 / GTI / Clubsport / R"; active_vehicle_profile.electrical_bus = "MQB EVO HIGH-SPEED CAN"; active_vehicle_profile.network_generation = SERIES_MQB_A_CLASS; }
+    else if (strcmp(chassis, "3C") == 0 || strcmp(chassis, "AN") == 0) { active_vehicle_profile.model_name = "VW Passat B6 / B7 / CC"; active_vehicle_profile.electrical_bus = "CAN-TP2.0 INFRASTRUCTURE"; active_vehicle_profile.network_generation = SERIES_PQ35_46_LEGACY; }
+    else if (strcmp(chassis, "3G") == 0 || strcmp(chassis, "CB") == 0) { active_vehicle_profile.model_name = "VW Passat B8 (MQB)"; active_vehicle_profile.electrical_bus = "HIGH-SPEED MQB CAN"; active_vehicle_profile.network_generation = SERIES_MQB_A_CLASS; }
+    else if (strcmp(chassis, "A3") == 0) { active_vehicle_profile.model_name = "VW Passat B9 (MQB EVO)"; active_vehicle_profile.electrical_bus = "MQB EVO HIGH-SPEED CAN"; active_vehicle_profile.network_generation = SERIES_MQB_A_CLASS; }
+    else if (strcmp(chassis, "13") == 0) { active_vehicle_profile.model_name = "VW Scirocco Coupe"; active_vehicle_profile.electrical_bus = "CAN-TP2.0 INTERFACE"; active_vehicle_profile.network_generation = SERIES_PQ35_46_LEGACY; }
+    else if (strcmp(chassis, "5N") == 0) { active_vehicle_profile.model_name = "VW Tiguan SUV (Mk1)"; active_vehicle_profile.electrical_bus = "CAN-TP2.0 INTERFACE"; active_vehicle_profile.network_generation = SERIES_PQ35_46_LEGACY; }
+    else if (strcmp(chassis, "AD") == 0 || strcmp(chassis, "AX") == 0) { active_vehicle_profile.model_name = "VW Tiguan Mk2 (MQB)"; active_vehicle_profile.electrical_bus = "HIGH-SPEED MQB CAN"; active_vehicle_profile.network_generation = SERIES_MQB_A_CLASS; }
+    else if (strcmp(chassis, "CT") == 0) { active_vehicle_profile.model_name = "VW Tiguan Mk3 (MQB EVO)"; active_vehicle_profile.electrical_bus = "MQB EVO HIGH-SPEED CAN"; active_vehicle_profile.network_generation = SERIES_MQB_A_CLASS; }
+    else if (strcmp(chassis, "6R") == 0 || strcmp(chassis, "6C") == 0) { active_vehicle_profile.model_name = "VW Polo Hatchback (PQ25)"; active_vehicle_profile.electrical_bus = "CAN-TP2.0 COMPACT"; active_vehicle_profile.network_generation = SERIES_SMALL_PO_SKODA; }
+    else if (strcmp(chassis, "AW") == 0) { active_vehicle_profile.model_name = "VW Polo GTI / Hatch (MQB A0)"; active_vehicle_profile.electrical_bus = "HIGH-SPEED MQB CAN"; active_vehicle_profile.network_generation = SERIES_SMALL_PO_SKODA; }
+    else if (strcmp(chassis, "AN") == 0) { active_vehicle_profile.model_name = "VW T-Roc Sport Crossover"; active_vehicle_profile.electrical_bus = "HIGH-SPEED MQB CAN"; active_vehicle_profile.network_generation = SERIES_MQB_A_CLASS; }
+    else if (strcmp(chassis, "3H") == 0) { active_vehicle_profile.model_name = "VW Arteon GranTurismo"; active_vehicle_profile.electrical_bus = "HIGH-SPEED MQB CAN"; active_vehicle_profile.network_generation = SERIES_MQB_A_CLASS; }
+
+    // --- SEAT / CUPRA ---
+        else if (strcmp(chassis, "1P") == 0) { active_vehicle_profile.model_name = "Seat Leon Cupra (Mk2 PQ35)"; active_vehicle_profile.electrical_bus = "CAN-TP2.0 POWERTRAIN"; active_vehicle_profile.network_generation = SERIES_PQ35_46_LEGACY; }
+    else if (strcmp(chassis, "5F") == 0) { active_vehicle_profile.model_name = "Seat Leon FR / Cupra (Mk3 MQB)"; active_vehicle_profile.electrical_bus = "HIGH-SPEED MQB CAN"; active_vehicle_profile.network_generation = SERIES_MQB_A_CLASS; }
+    else if (strcmp(chassis, "KL") == 0) { active_vehicle_profile.model_name = "Cupra Leon / Formentor (Mk4 MQB EVO)"; active_vehicle_profile.electrical_bus = "MQB EVO HIGH-SPEED CAN"; active_vehicle_profile.network_generation = SERIES_MQB_A_CLASS; }
+    else if (strcmp(chassis, "KJ") == 0) { active_vehicle_profile.model_name = "Seat Ibiza / Arona (MQB A0)"; active_vehicle_profile.electrical_bus = "HIGH-SPEED MQB CAN"; active_vehicle_profile.network_generation = SERIES_SMALL_PO_SKODA; }
+    
+    // --- SKODA AUTOMOTIVE ---
+    else if (strcmp(chassis, "1Z") == 0) { active_vehicle_profile.model_name = "Skoda Octavia vRS (Mk2 PQ35)"; active_vehicle_profile.electrical_bus = "CAN-TP2.0 POWERTRAIN"; active_vehicle_profile.network_generation = SERIES_PQ35_46_LEGACY; }
+    else if (strcmp(chassis, "5E") == 0) { active_vehicle_profile.model_name = "Skoda Octavia vRS (Mk3 MQB)"; active_vehicle_profile.electrical_bus = "HIGH-SPEED MQB CAN"; active_vehicle_profile.network_generation = SERIES_MQB_A_CLASS; }
+    else if (strcmp(chassis, "NX") == 0) { active_vehicle_profile.model_name = "Skoda Octavia vRS (Mk4 MQB EVO)"; active_vehicle_profile.electrical_bus = "MQB EVO HIGH-SPEED CAN"; active_vehicle_profile.network_generation = SERIES_MQB_A_CLASS; }
+    else if (strcmp(chassis, "3T") == 0) { active_vehicle_profile.model_name = "Skoda Superb Saloon (3T)"; active_vehicle_profile.electrical_bus = "CAN-TP2.0 INFRASTRUCTURE"; active_vehicle_profile.network_generation = SERIES_PQ35_46_LEGACY; }
+    else if (strcmp(chassis, "3V") == 0) { active_vehicle_profile.model_name = "Skoda Superb (MQB Matrix)"; active_vehicle_profile.electrical_bus = "HIGH-SPEED MQB CAN"; active_vehicle_profile.network_generation = SERIES_MQB_A_CLASS; }
+    
+    // --- PORSCHE MATRIX ---
+    else if (strcmp(chassis, "92") == 0) { active_vehicle_profile.model_name = "Porsche Cayenne SUV (92A)"; active_vehicle_profile.electrical_bus = "MLB-INFRASTRUCTURE CAN"; active_vehicle_profile.network_generation = SERIES_MLB_LONG_CLASS; }
+    else if (strcmp(chassis, "9B") == 0) { active_vehicle_profile.model_name = "Porsche Macan Crossover (95B)"; active_vehicle_profile.electrical_bus = "MLB-INFRASTRUCTURE CAN"; active_vehicle_profile.network_generation = SERIES_MLB_LONG_CLASS; }
+    
+    // 3. MAP MODEL YEAR CHARACTER INDICES (POSITION 10)
+    char year_char = vin[9];
+    if (year_char >= 'D' && year_char <= 'H') {
+       // D=2013, E=2014, F=2015, G=2016, H=2017 
+       active_vehicle_profile.production_year = 2013 + (year_char - 'D');
+    } 
+    else if (year_char >= 'J' && year_char <= 'N') {
+       // J=2018, K=2019, L=2020, M=2021, N=2022 (Skips 'I') 
+       active_vehicle_profile.production_year = 2018 + (year_char - 'J');
+    }
+    else if (year_char >= 'P' && year_char <= 'R') {
+       // P=2023, R=2024 (Skips 'O', 'Q') 
+       active_vehicle_profile.production_year = 2023 + (year_char - 'P');
+    }
+    else if (year_char == 'S') {
+       active_vehicle_profile.production_year = 2025;
+    }
+    else if (year_char == 'T') {
+       active_vehicle_profile.production_year = 2026;
+    }
+
+    // Print Detailed Metadata Trace out to the Console Buffer
+    Serial.println("\n=======================================================");
+    Serial.println("         DECODED VEHICLE TELEMETRY PROFILE             ");
+    Serial.println("=======================================================");
+    Serial.print("  MANUFACTURER ORIGIN : "); Serial.println(active_vehicle_profile.brand);
+    Serial.print("  DESIGN PLATFORM LINE: "); Serial.println(active_vehicle_profile.model_name);
+    Serial.print("  ELECTRICAL BUS TYPE : "); Serial.println(active_vehicle_profile.electrical_bus);
+    Serial.print("  PRODUCTION YEAR     : "); Serial.println(active_vehicle_profile.production_year);
+    Serial.println("=======================================================\n");
+  }
+
+
+void startTwaiChannel(int port_idx, int tx_pin, int rx_pin) {
   twai_general_config_t g_cfg = TWAI_GENERAL_CONFIG_DEFAULT((gpio_num_t)tx_pin, (gpio_num_t)rx_pin, TWAI_MODE_NORMAL);
   
   // Explicitly map target layout channel assignment to hardware layout registers
@@ -650,8 +773,15 @@ bool runBootDiagnostic(int port_idx, int tx_pin, int rx_pin, const char* label) 
   
   // Removed invalid (twai_port_num_t) typecast
   twai_driver_install_v2(&g_cfg, &t_cfg, &f_cfg, &twai_ports[port_idx]);
-  twai_start_v2(twai_ports[port_idx]);
+  
+  // Check hardware initialization status explicitly on boot
+  if (twai_start_v2(twai_ports[port_idx]) == ESP_OK) {
+      Serial.printf("[SYSTEM] CAN Channel %d (TX:%d, RX:%d) initialized and started successfully.\n", port_idx, tx_pin, rx_pin);
+  } else {
+      Serial.printf("[CRITICAL] Failed to activate hardware registers for CAN Channel %d\n", port_idx);
+  }
 }
+
  // -------------------------------------------------------------// RAW NETWORK STREAM RECEPTION & VAG-SCALING TRANSLATION// -------------------------------------------------------------
  void processInboundFrames(int port_idx, const char* networkName)
   {
@@ -766,6 +896,7 @@ void decodeDriveTrain(twai_message_t &msg)
        alarm_sounding = false;
     }
   }
+
 
 
 }
