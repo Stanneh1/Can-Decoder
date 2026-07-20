@@ -597,6 +597,7 @@ bool requestVehicleVIN(char* vinBuffer, size_t bufferSize) {
                 }
                 // Case B: ISO-TP Consecutive Frame (0x21, 0x22, etc.)
                 else if ((rx_msg.data[0] & 0xF0) == 0x20 && flowControlSent) {
+                    // Start reading at index 1 because index 0 is the sequence number (e.g. 0x21)
                     for (int i = 1; i < 8 && charsCollected < 17; i++) {
                         vinBuffer[charsCollected++] = rx_msg.data[i];
                     }
