@@ -558,7 +558,7 @@ bool requestVehicleVIN(char* vinBuffer, size_t bufferSize) {
     for(int i=4; i<8; i++) tx_msg.data[i] = 0xAA; // Padding
 
     // Fire request out on Channel 0 (Drive Train Bus)
-    if (twai_transmit_v2(twai_ports[0], &tx_msg, pdMS_TO_TICKS(100)) != ESP_OK) {
+    if ( twai_transmit_v2(twai_ports[0], &tx_msg, pdMS_TO_TICKS(100)) != ESP_OK) {
         Serial.println("[VIN DETECT] Failed to transmit diagnostic query frame.");
         return false;
     }
