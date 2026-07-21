@@ -23,9 +23,45 @@
 #include <ESPAsyncWebServer.h>
 #include <ArduinoJson.h>
 
+
 // --- THREAD-SAFE FIXED CHAR BUFFER ARRAY ---
 static char global_ws_buffer[256]; // Allocates a fixed memory space block
 static volatile bool ws_payload_ready = false;
+
+// --- DYNAMIC GRAPHICAL UI OBJECT POINTERS ---
+static lv_obj_t *tv; // Tabview base container
+static lv_obj_t *rpm_meter;
+static lv_obj_t *boost_meter;
+static lv_obj_t *oil_arc;
+static lv_obj_t *coolant_arc;
+
+static lv_obj_t *lbl_rpm_val;
+static lv_obj_t *lbl_boost_val;
+static lv_obj_t *lbl_temps_val;
+static lv_obj_t *label_comfort;
+static lv_obj_t *label_infotainment;
+
+// --- COLOR AND TIMER VARIABLES ---
+static lv_color_t color_cool_blue;
+static lv_color_t color_normal_green;
+static lv_color_t color_alert_red;
+
+static uint32_t last_beep_time = 0;
+static bool alarm_sounding = false;
+
+// --- GLOBAL TELEMETRY STORAGE STRUCTURE ---
+struct LiveTelemetryMetrics {
+    float engine_rpm = 0.0;
+    float boost_bar = 0.0;
+    float peak_boost_bar = 0.0;
+    float oil_temp = 0.0;
+    float coolant_temp = 0.0;
+    bool driver_door_open = false;
+    float target_temp = 0.0;
+    uint8_t mmi_key_code = 0x00;
+};
+// CREATES THE INSTANCE DIRECTLY (Removed the broken 'extern' tag!)
+LiveTelemetryMetrics s3_live_metrics; 
 
 // --- ADVANCED VEHICLE DECODING BASES ---
 enum MqbPlatformSeries {
@@ -34,6 +70,115 @@ enum MqbPlatformSeries {
     SERIES_MLB_LONG_CLASS, // Audi A4/A5/A6/A7/A8/Q5/Q7/Q8 Longitudinals (B8, B9, C7, C8)
     SERIES_PQ35_46_LEGACY, // Golf Mk5/Mk6, Audi A3 8P, Passat B6/B7, Scirocco
     SERIES_SMALL_PO_SKODA  // Polo, Ibiza, Fabia, Audi A1
+};
+
+// --- ABSTRACT MULTI-VEHICLE PARSER INTERFACE BLUEPRINT ---
+class BaseVehicleInterpreter {
+public:
+    virtual ~BaseVehicleInterpreter() {}
+    virtual void interpretDriveTrain(twai_message_t &msg) = 0;
+    virtual void interpretComfort(twai_message_t &msg) = 0;
+    virtual void interpretInfotainment(twai_message_t &msg) = 0;
+    virtual void configureUiLimits() = 0;
+};
+
+// INITIALISES THE OBJECT POINTER DIRECTLY (Removed the broken 'extern' tag!)
+BaseVehicleInterpreter* currentCarInterpreter = NULL;
+
+// =========================================================================
+//  CLASS PROFILE: AUDI S3 / RECENT MQB PLATFORM ENGINE TRANSLATIONS
+// =========================================================================
+class AudiS38VInterpreter : public BaseVehicleInterpreter {
+public:
+    void interpretDriveTrain(twai_message_t &msg) override {
+        switch(msg.identifier) {
+            case 0x0FC: s3_live_metrics.engine_rpm = ((msg.data[1] << 8) | msg.data[0]) * 0.25; break;
+            case 0x1A2: s3_live_metrics.oil_temp = msg.data[0] - 40; s3_live_metrics.coolant_temp = msg.data[0] - 40; break;
+            case 0x28A: {
+                int raw_mbar = ((msg.data[1] << 8) | msg.data[0]) * 10;
+                s3_live_metrics.boost_bar = (raw_mbar - 1013) / 1000.0;
+                if (s3_live_metrics.boost_bar < 0) s3_live_metrics.boost_bar = 0;
+                break;
+            }
+        }
+    }
+    void interpretComfort(twai_message_t &msg) override {
+        if (msg.identifier == 0x61C) s3_live_metrics.driver_door_open = msg.data[0] & 0x01;
+        else if (msg.identifier == 0x527) s3_live_metrics.target_temp = msg.data[0] * 0.5;
+    }
+    void interpretInfotainment(twai_message_t &msg) override {
+        if (msg.identifier == 0x695) s3_live_metrics.mmi_key_code = msg.data[0];
+    }
+    void configureUiLimits() override {
+        color_normal_green = lv_color_make(180, 0, 0); // Dynamic Audi Red Illumination Theme!
+        if (rpm_meter != NULL) lv_arc_set_range(rpm_meter, 0, 8000);
+        if (boost_meter != NULL) lv_bar_set_range(boost_meter, 0, 250);
+    }
+};
+
+// =========================================================================
+//  CLASS PROFILE: AUDI S3 (PQ35 8P PLATFORM ERA - LEGACY TRANSLATIONS)
+// =========================================================================
+class AudiS38PInterpreter : public BaseVehicleInterpreter {
+public:
+    void interpretDriveTrain(twai_message_t &msg) override {
+        switch(msg.identifier) {
+            case 0x280: // PQ35 Engine RPM Frame
+                // Scaling layout formula: Byte 3 and Byte 2 combined * 0.25
+                s3_live_metrics.engine_rpm = ((msg.data[3] << 8) | msg.data[2]) * 0.25;
+                break;
+                
+            case 0x288: // PQ35 Coolant / Engine Temps Frame
+                // Base formula offset is typically msg.data[1] minus a 40-degree offset index
+                s3_live_metrics.coolant_temp = msg.data[1] - 40;
+                s3_live_metrics.oil_temp = msg.data[2] - 40; // Variant dependent
+                break;
+                
+            case 0x380: // PQ35 Boost / Ambient Context Frame
+                // Older map sensor layouts resolve absolute pressure differently 
+                int absolute_mbar = msg.data[4] * 10; 
+                s3_live_metrics.boost_bar = (absolute_mbar - 1013) / 1000.0;
+                if (s3_live_metrics.boost_bar < 0) s3_live_metrics.boost_bar = 0;
+                break;
+        }
+    }
+
+    void interpretComfort(twai_message_t &msg) override {
+        // PQ35 Comfort Bus uses distinct convenience identifiers 
+        if (msg.identifier == 0x351) { 
+            s3_live_metrics.driver_door_open = msg.data[0] & 0x01;
+        }
+    }
+
+    void interpretInfotainment(twai_message_t &msg) override {
+        // Older RNSE / Concert scroll tracking parameters
+        if (msg.identifier == 0x5C1) {
+            s3_live_metrics.mmi_key_code = msg.data[0];
+        }
+    }
+
+    void configureUiLimits() override {
+        // Enforce traditional 8P classic performance dashboard visuals
+        color_normal_green = lv_color_make(220, 0, 0); // Bold Audi Instrument Red Theme
+        if (rpm_meter != NULL) lv_arc_set_range(rpm_meter, 0, 8000); // 8000 RPM Max
+        if (boost_meter != NULL) lv_bar_set_range(boost_meter, 0, 200); // 2.0 Bar Gauge Max
+    }
+};
+
+
+// =========================================================================
+//  CLASS PROFILE: GENERIC FALLBACK INTERPRETER (BENCH MODE)
+// =========================================================================
+class GenericVehicleInterpreter : public BaseVehicleInterpreter {
+public:
+    void interpretDriveTrain(twai_message_t &msg) override {}
+    void interpretComfort(twai_message_t &msg) override {}
+    void interpretInfotainment(twai_message_t &msg) override {}
+    void configureUiLimits() override {
+        color_normal_green = lv_color_make(0, 180, 0); // Balanced Baseline Green Theme!
+        if (rpm_meter != NULL) lv_arc_set_range(rpm_meter, 0, 6000);
+        if (boost_meter != NULL) lv_bar_set_range(boost_meter, 0, 150);
+    }
 };
 
 struct DecodedVehicleMetrics {
@@ -51,6 +196,7 @@ const char* ap_password = "Password123";
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
 static uint32_t last_web_broadcast = 0;
+
 
 // --- EMBEDDED DASHBOARD HTML PAGE ---
 const char index_html[] PROGMEM = R"rawhtml(
@@ -148,28 +294,13 @@ struct VehicleData {
   bool driver_door_open = false;
   float target_temp = 22.0;
   int mmi_key_code = 0;
-} s3_live_metrics;
+}; 
 
-// --- DYNAMIC GRAPHICAL UI OBJECT POINTERS ---
-static lv_obj_t *tv; // Tabview base container
-static lv_obj_t *rpm_meter;
-static lv_obj_t *boost_meter;
-static lv_obj_t *oil_arc;
-static lv_obj_t *coolant_arc;
+// =========================================================================
+//  ABSTRACT MULTI-VEHICLE PARSER INTERFACE & IMPLEMENTATIONS
+// =========================================================================
 
-static lv_obj_t *lbl_rpm_val;
-static lv_obj_t *lbl_boost_val;
-static lv_obj_t *lbl_temps_val;
-static lv_obj_t *label_comfort;
-static lv_obj_t *label_infotainment;
 
-// --- COLOR AND TIMER VARIABLES ---
-static lv_color_t color_cool_blue;
-static lv_color_t color_normal_green;
-static lv_color_t color_alert_red;
-
-static uint32_t last_beep_time = 0;
-static bool alarm_sounding = false;
 
 // Forward Declarations for LVGL Touch Callbacks
 static void handleBoostResetTouch(lv_event_t * e);
@@ -266,6 +397,7 @@ void CockpitCoreProcessor(void *pvParameters) {
 void setup() {
   Serial.begin(921600);
   while(!Serial) delay(10);
+  currentCarInterpreter = new GenericVehicleInterpreter();
   Serial.println("\n=== PILOT COCKPIT SAFETY PLATFORM INITIALISING ===");
 
   pinMode(AUDIO_PWM_PIN, OUTPUT);
@@ -456,6 +588,11 @@ void buildCockpitUI() {
 
   label_infotainment = lv_label_create(tab3);
   lv_obj_align(label_infotainment, LV_ALIGN_TOP_LEFT, 10, 10);
+
+  if (currentCarInterpreter != NULL) {
+        currentCarInterpreter->configureUiLimits();
+        Serial.println("[UI ENGINE] Dynamic UI constraints and graphics mappings applied successfully.");
+    }
 }
 
 // -------------------------------------------------------------
@@ -751,6 +888,25 @@ void decodeAndPrintVehicleIdentity(const char* vin) {
     else if (year_char == 'T') {
        active_vehicle_profile.production_year = 2026;
     }
+    
+    // Clear out any stale instance leftovers from memory space cleanly
+    if (currentCarInterpreter != NULL) {
+        delete currentCarInterpreter;
+    }
+
+    // Allocate the dynamic object profile based on the verified chassis identification bits
+    if (active_vehicle_profile.network_generation == SERIES_MQB_A_CLASS) {
+        currentCarInterpreter = new AudiS38VInterpreter();
+        Serial.println("[DECOUPLER] Dynamic Instance Allocation: AudiS38VInterpreter class loaded cleanly.");
+    }
+    else if (active_vehicle_profile.network_generation == SERIES_PQ35_46_LEGACY) {
+        currentCarInterpreter = new AudiS38PInterpreter();
+        Serial.println("[DECOUPLER] Dynamic Instance Allocation: AudiS38PInterpreter (PQ35) class loaded cleanly.");
+      }
+       else {
+        currentCarInterpreter = new GenericVehicleInterpreter();
+        Serial.println("[DECOUPLER] Dynamic Instance Allocation: Loading Generic Baseline Interface.");
+    }
 
     // Print Detailed Metadata Trace out to the Console Buffer
     Serial.println("\n=======================================================");
@@ -785,32 +941,32 @@ void startTwaiChannel(int port_idx, int tx_pin, int rx_pin) {
 }
 
  // -------------------------------------------------------------// RAW NETWORK STREAM RECEPTION & VAG-SCALING TRANSLATION// -------------------------------------------------------------
- void processInboundFrames(int port_idx, const char* networkName)
-  {
+void processInboundFrames(int port_idx, const char* networkName) {
     twai_message_t msg;
-    if (twai_receive_v2(twai_ports[port_idx], &msg, 0) == ESP_OK)
-    {
-      // Global Console System Logger Outlay (As requested)Serial.print("[");
-       Serial.print(networkName); Serial.print("] ID: 0x");
-       Serial.print(msg.identifier, HEX);
-       Serial.print(" | HEX DATA PAYLOAD: ");
-       for(int i = 0; i < msg.data_length_code; i++)
-        {
-          if(msg.data[i] < 0x10)
-           Serial.print("0");
-           Serial.print(msg.data[i], HEX);
-           Serial.print(" ");
-        }
+    if (twai_receive_v2(twai_ports[port_idx], &msg, 0) == ESP_OK) {
         
-        Serial.print("| -> ");
-        // Redirect traffic vectors to corresponding layout decoders
-        if (port_idx == 0) 
-         decodeDriveTrain(msg);
-        else if (port_idx == 1) 
-         decodeComfort(msg);
-        else if (port_idx == 2) decodeInfotainment(msg);
-     }
-  }
+        // 1. Core Network Console Logging Outlay
+        Serial.print("["); Serial.print(networkName); Serial.print("] ID: 0x");
+        Serial.print(msg.identifier, HEX); Serial.print(" | HEX DATA PAYLOAD: ");
+
+        for(int i = 0; i < msg.data_length_code; i++) {
+            if(msg.data[i] < 0x10) {
+                Serial.print("0");
+            }
+            Serial.print(msg.data[i], HEX);
+            Serial.print(" ");
+        }
+        Serial.println(); // Terminate the hex monitor dump trace line cleanly
+
+        // 2. Redirect Traffic Vectors to Corresponding Class Dynamic Sub-Interpreters
+        if (currentCarInterpreter != NULL) {
+            if (port_idx == 0)      currentCarInterpreter->interpretDriveTrain(msg);
+            else if (port_idx == 1) currentCarInterpreter->interpretComfort(msg);
+            else if (port_idx == 2) currentCarInterpreter->interpretInfotainment(msg);
+        }
+    }
+}
+
 void decodeDriveTrain(twai_message_t &msg)
 {
     switch(msg.identifier)
