@@ -284,17 +284,7 @@ const char index_html[] PROGMEM = R"rawhtml(
 // Core Handles for the V2 Multi-Port API
 twai_handle_t twai_ports[3];
 
-// --- TELEMETRY RECORD STRUCTURES ---
-struct VehicleData {
-  float engine_rpm = 0;
-  float boost_bar = 0;
-  float peak_boost_bar = 0; 
-  int oil_temp = 0;
-  int coolant_temp = 0;
-  bool driver_door_open = false;
-  float target_temp = 22.0;
-  int mmi_key_code = 0;
-}; 
+
 
 // =========================================================================
 //  ABSTRACT MULTI-VEHICLE PARSER INTERFACE & IMPLEMENTATIONS
