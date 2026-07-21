@@ -965,77 +965,7 @@ void processInboundFrames(int port_idx, const char* networkName) {
             else if (port_idx == 2) currentCarInterpreter->interpretInfotainment(msg);
         }
     }
-}
-
-void decodeDriveTrain(twai_message_t &msg)
-{
-    switch(msg.identifier)
-    {
-    case 0x0FC:
-        s3_live_metrics.engine_rpm = ((msg.data[1] << 8) | msg.data[0]) * 0.25;
-        Serial.print("ENG DESCRIPTION: Engine Crankshaft Speed RPM | ACTUAL NUMBER: ");
-        Serial.print(s3_live_metrics.engine_rpm, 1);
-        Serial.println(" RPM");
-        break;
-
-    case 0x1A2:
-        s3_live_metrics.oil_temp = msg.data[0] - 40;
-        s3_live_metrics.coolant_temp = msg.data[1] - 40;
-        Serial.print("ENG DESCRIPTION: Powertrain Thermal Mass Levels | ACTUAL NUMBER: Oil Temp: ");
-        Serial.print(s3_live_metrics.oil_temp);
-        Serial.print(" C, Coolant Temp: ");
-        Serial.print(s3_live_metrics.coolant_temp);
-        Serial.println(" C");
-        break;
-
-    case 0x28A:
-        { // ◄ Bracket added to open a safe scoped block for local variables
-            int raw_mbar = ((msg.data[1] << 8) | msg.data[0]) * 10;
-            s3_live_metrics.boost_bar = (raw_mbar - 1013) / 1000.0;
-            if (s3_live_metrics.boost_bar < 0) {
-                s3_live_metrics.boost_bar = 0;
-            }
-            Serial.print("ENG DESCRIPTION: Turbocharger Boost Profile Pressure | ACTUAL NUMBER: Net Manifold Boost: ");
-            Serial.print(s3_live_metrics.boost_bar, 2);
-            Serial.println(" bar");
-        } // ◄ Bracket added to cleanly isolate raw_mbar
-        break;
-
-    default:
-        Serial.println("ENG DESCRIPTION: Base Engine Control Electronics Inter-Module Communication Frame");
-        break;
-    }
-}
-    void decodeComfort(twai_message_t &msg) 
-    {
-      switch(msg.identifier)
-      {
-        case 0x61C:s3_live_metrics.driver_door_open = msg.data[0] & 0x01;
-         Serial.print("CMF DESCRIPTION: Body Control Module Structural Aperture State Matrix | ACTUAL NUMBER: Driver Front: ");
-         Serial.println(s3_live_metrics.driver_door_open ? "OPEN" : "CLOSED");
-        break;
-         case 0x527:s3_live_metrics.target_temp = msg.data[0] * 0.5;
-           Serial.print("CMF DESCRIPTION: Climatic Control Cabin Thermal Request Vector | ACTUAL NUMBER: Target Temp: ");
-           Serial.print(s3_live_metrics.target_temp, 1);
-           Serial.println(" C");
-          break;
-          default:
-           Serial.println("CMF DESCRIPTION: Interior Body Convenience Systems Framework Bus Array Data Line");
-          break;
-       }
-    }
-    void decodeInfotainment(twai_message_t &msg) 
-    {
-      switch(msg.identifier) 
-      {
-        case 0x695:s3_live_metrics.mmi_key_code = msg.data[0];Serial.print("INF DESCRIPTION: Multi-Media Control Interface Wheel Key Input Matrix Vector | ACTUAL NUMBER: Button Array Hex: ");
-         Serial.println(s3_live_metrics.mmi_key_code, HEX);
-         break;
-         default:
-         Serial.println("INF DESCRIPTION: Multimedia Entertainment, High-Frequency Audio, or Sound Stage Processing Output");
-         break;
-      }
-    }
+  }
     // -------------------------------------------------------------// ASYNCHRONOUS ACOUSTIC AUDIO ENGINE (NON-BLOCKING)// -------------------------------------------------------------
     void runAcousticAlertEngine() 
     {
@@ -1054,7 +984,4 @@ void decodeDriveTrain(twai_message_t &msg)
        alarm_sounding = false;
     }
   }
-
-
-
 }
