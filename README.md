@@ -3,7 +3,7 @@
 A modular, extensible real-time CAN bus decoder and vehicle telemetry display system built for ESP32 microcontrollers. Designed to decode, interpret, and visualize automotive CAN bus messages from any CAN-equipped vehicle.
 
 **Current Support:** Volkswagen Group vehicles (Audi, Volkswagen, Skoda, Seat/Cupra, Porsche)  
-**Platform Coverage:** 46 vehicle models across 4 major electrical architectures (MQB, PQ-Legacy, MLB, Compact A0)  
+**Platform Coverage:** 38 Models vehicle models across 4 major electrical architectures (MQB, PQ-Legacy, MLB, Compact A0)  
 **Future Support:** Extensible architecture enables support for any CAN-equipped platform
 
 ---
@@ -34,7 +34,7 @@ A modular, extensible real-time CAN bus decoder and vehicle telemetry display sy
 This project implements a **universal CAN bus decoder** that captures raw CAN frames from vehicle electrical systems and translates them into human-readable telemetry metrics. The system features:
 
 - **Multi-platform decoding engine** with 4 distinct electrical architecture interpreters (MQB Matrix, PQ-Legacy, MLB Longitudinal, Compact A0)
-- **46 vehicle model coverage** with model-specific signal extraction and UI limits
+- **38 vehicle model coverage** with model-specific signal extraction and UI limits
 - **Real-time metric parsing** at 1ms tick resolution across multiple independent CAN buses
 - **Dynamic vehicle identification** via VIN decoding (automatically loads correct interpreter)
 - **Modular interpreter pattern** - add new vehicles without touching core logic
@@ -201,7 +201,7 @@ The system is designed from the ground up for **platform-agnostic extensibility*
 **Seat/Cupra:**
 - Ibiza MQB A0
 
-**Total Coverage: 46 Unique Vehicle Models across 4 Platforms**
+**Total Coverage: 38 Models Unique Vehicle Models across 4 Platforms**
 
 ---
 
@@ -810,5 +810,5 @@ twai_timing_config_t t_cfg = TWAI_TIMING_CONFIG_500KBITS();
 
 **Last Updated:** July 22, 2026  
 **Status:** Active Development  
-**Supported Vehicles:** 46 Models across 4 Platforms  
+**Supported Vehicles:** 38 Models across 4 Platforms  
 **Lines of Code:** ~5,500 total
