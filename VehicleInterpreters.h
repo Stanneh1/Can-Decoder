@@ -5,7 +5,7 @@
 #include "driver/twai.h"
 #include <lvgl.h>
 
-// --- ADVANCED VEHICLE DECODING BASES ---
+// --- ADVANCED VEHICLE DECODING ENUMS ---
 enum MqbPlatformSeries {
     SERIES_UNKNOWN,
     SERIES_MQB_A_CLASS,    
@@ -14,7 +14,7 @@ enum MqbPlatformSeries {
     SERIES_SMALL_PO_SKODA  
 };
 
-// --- GLOBAL TELEMETRY STORAGE STRUCTURE ---
+// --- GLOBAL TELEMETRY STRUCT LAYOUT TEMPLATES ---
 struct LiveTelemetryMetrics {
     float engine_rpm = 0.0;
     float boost_bar = 0.0;
@@ -34,13 +34,6 @@ struct DecodedVehicleMetrics {
     MqbPlatformSeries network_generation = SERIES_UNKNOWN;
 };
 
-// Share variable definitions safely across files without duplicates
-extern LiveTelemetryMetrics s3_live_metrics;
-extern DecodedVehicleMetrics active_vehicle_profile;
-extern lv_obj_t *rpm_meter;
-extern lv_obj_t *boost_meter;
-extern lv_color_t color_normal_green;
-
 // --- ABSTRACT MULTI-VEHICLE PARSER INTERFACE BLUEPRINT ---
 class BaseVehicleInterpreter {
 public:
@@ -51,28 +44,40 @@ public:
     virtual void configureUiLimits() = 0;
 };
 
-// Global unified tracking instance pointer allocation handle
-extern BaseVehicleInterpreter* currentCarInterpreter;
-
 // =========================================================================
-//  VEHICLE SUB-CLASS CONFIGURATION PROFILES
+//  CLEAN GLOBAL STORAGE CONFIGURATIONS (Prevents Linker Overlap Crashes)
 // =========================================================================
-class AudiS38VInterpreter : public BaseVehicleInterpreter {
-public:
-    void interpretDriveTrain(twai_message_t &msg) override;
-    void interpretComfort(twai_message_t &msg) override;
-    void interpretInfotainment(twai_message_t &msg) override;
-    void configureUiLimits() override;
+struct GlobalFrameworkContext {
+    LiveTelemetryMetrics metrics;
+    DecodedVehicleMetrics profile;
+    BaseVehicleInterpreter* interpreter = nullptr;
+    
+    // UI Layout tracking pointer references
+    lv_obj_t* tv = nullptr;
+    lv_obj_t* rpm_meter = nullptr;
+    lv_obj_t* boost_meter = nullptr;
+    lv_obj_t* oil_arc = nullptr;
+    lv_obj_t* coolant_arc = nullptr;
+    
+    lv_color_t normal_green;
 };
 
-class AudiS38PInterpreter : public BaseVehicleInterpreter {
-public:
-    void interpretDriveTrain(twai_message_t &msg) override;
-    void interpretComfort(twai_message_t &msg) override;
-    void interpretInfotainment(twai_message_t &msg) override;
-    void configureUiLimits() override;
-};
+// =========================================================================
+//  GLOBAL EXTERN LINKS - PLACED SAFELY AFTER THEIR TYPES ARE KNOWN
+// =========================================================================
+extern GlobalFrameworkContext* sys_ctx;
+extern DecodedVehicleMetrics active_vehicle_profile;
 
+// FIXED: Defined explicitly as an array handle to clear the simulator tab scope
+extern twai_handle_t twai_ports[]; 
+
+extern lv_obj_t *rpm_meter;
+extern lv_obj_t *boost_meter;
+extern lv_color_t color_normal_green;
+
+// =========================================================================
+//  BENCH COMPACT GENERIC FALLBACK INTERPRETER BLUEPRINT
+// =========================================================================
 class GenericVehicleInterpreter : public BaseVehicleInterpreter {
 public:
     void interpretDriveTrain(twai_message_t &msg) override {}
