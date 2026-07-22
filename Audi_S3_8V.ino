@@ -3,7 +3,11 @@
 #include <ESPAsyncWebServer.h>
 #include <AsyncTCP.h>
 #include <ArduinoJson.h>
-#include "VehicleInterpreters.h" // Links your new custom tab system config
+#include "VehicleInterpreters.h"
+#include "Model_MQB_8V.h"  // Include our new modular cars
+#include "Model_PQ35_8P.h"
+#include "Model_PQ47_4L.h"
+#include "VehicleSimulator.h" 
 
 // --- HARDWARE CONFIGURATION MAPPINGS ---
 // 40-Pin Expansion Header Layout Assignments
@@ -41,6 +45,11 @@ lv_obj_t *lbl_temps_val;
 lv_obj_t *label_comfort;
 lv_obj_t *label_infotainment;
 
+// --- PLACE THIS DIRECTLY INSIDE Audi_S3_8V.ino (Lines 45-55) ---
+LiveTelemetryMetrics s3_live_metrics;
+DecodedVehicleMetrics active_vehicle_profile;
+BaseVehicleInterpreter* currentCarInterpreter = NULL;
+
 // --- COLOR AND TIMER VARIABLES ---
 lv_color_t color_cool_blue;
 lv_color_t color_normal_green; // Removed static to match header definition
@@ -48,11 +57,6 @@ lv_color_t color_alert_red;
 
 static uint32_t last_beep_time = 0;
 static bool alarm_sounding = false;
-
-// --- REAL VARIABLE MEMORY ALLOCATION INSTANCES ---
-LiveTelemetryMetrics s3_live_metrics;
-DecodedVehicleMetrics active_vehicle_profile;
-BaseVehicleInterpreter* currentCarInterpreter = NULL;
 
 // --- WI-FI ACCESS POINT CREDENTIALS ---
 const char* ap_ssid = "Audi_S3_Telemetry";
@@ -230,11 +234,11 @@ void CockpitCoreProcessor(void *pvParameters) {
         static JsonDocument doc; 
         doc.clear(); 
         
-        doc["rpm"] = s3_live_metrics.engine_rpm;
-        doc["boost"] = s3_live_metrics.boost_bar;
-        doc["peak"] = s3_live_metrics.peak_boost_bar;
-        doc["oil"] = s3_live_metrics.oil_temp;
-        doc["h2o"] = s3_live_metrics.coolant_temp;
+        doc["rpm"]   = sys_ctx->metrics.engine_rpm;
+        doc["boost"] = sys_ctx->metrics.boost_bar;
+        doc["peak"]  = sys_ctx->metrics.peak_boost_bar;
+        doc["oil"]   = sys_ctx->metrics.oil_temp;
+        doc["h2o"]   = sys_ctx->metrics.coolant_temp;
         doc["car"] = active_vehicle_profile.model_name;
         
         // FIX: Serialize directly into the fixed character array without dynamic memory growth
@@ -250,9 +254,28 @@ void CockpitCoreProcessor(void *pvParameters) {
 
 
 void setup() {
+    // --- INJECT THIS LINE AT THE ABSOLUTE START OF SETUP() ---
+
   Serial.begin(921600);
-  while(!Serial) delay(10);
-  currentCarInterpreter = new GenericVehicleInterpreter();
+
+    // Strict blocking loop: Forces the ESP32 to wait until the PC monitor opens!
+    delay(500); 
+
+  // 2. STABILISATION GATE: Gives your PC's USB port time to fully connect
+  // (Flushes any phantom data out of the line so your text can print)
+  for (int i = 5; i > 0; i--) {
+      delay(400); 
+      Serial.printf("[BOOT] Initializing terminal interface... Ready in %d seconds.\n", i);
+  }
+
+  Serial.println();
+
+  sys_ctx = new GlobalFrameworkContext();
+
+   delay(200); 
+
+  sys_ctx->interpreter = new GenericVehicleInterpreter();
+   delay(200);
   Serial.println("\n=== PILOT COCKPIT SAFETY PLATFORM INITIALISING ===");
 
   pinMode(AUDIO_PWM_PIN, OUTPUT);
@@ -261,8 +284,11 @@ void setup() {
   // 1. RUN HARDWARE TRANSCIEVER ELECTRICAL DIAGNOSTICS ON BOOT
   bool system_safe = true;
   system_safe &= runBootDiagnostic(0, CH0_TX, CH0_RX, "Drive Train Transceiver");
+   delay(100);
   system_safe &= runBootDiagnostic(1, CH1_TX, CH1_RX, "Comfort Transceiver");
+   delay(100);
   system_safe &= runBootDiagnostic(2, CH2_TX, CH2_RX, "Infotainment Transceiver");
+ delay(100);
 
   if (!system_safe) {
     Serial.println("\n[CRITICAL ERROR] Transceiver hardware diagnostic check failed!");
@@ -270,9 +296,9 @@ void setup() {
   }
 
   // 2. PRODUCTION TWAI INTERFACE STARTUP
-  startTwaiChannel(0, CH0_TX, CH0_RX);
-  startTwaiChannel(1, CH1_TX, CH1_RX);
-  startTwaiChannel(2, CH2_TX, CH2_RX);
+  startTwaiChannel(0, CH0_TX, CH0_RX);  delay(100);
+  startTwaiChannel(1, CH1_TX, CH1_RX);  delay(100);
+  startTwaiChannel(2, CH2_TX, CH2_RX);  delay(100);
 
   // --- NEW ACTIVE VEHICLE IDENTIFICATION STAGE ---
     Serial.println("[SYSTEM] Interrogating Powertrain Bus for Vehicle Identification...");
@@ -336,14 +362,14 @@ void setup() {
   // Now it is completely safe to construct horizontal visual elements
   buildCockpitUI();
     // 5. SPAWN INDEPENDENT HIGH-MEMORY THREAD
-  xTaskCreatePinnedToCore(
+   xTaskCreatePinnedToCore(
     CockpitCoreProcessor,     // Target function to execute
-    "CockpitTask",            // Descriptive tag for memory tracking logs
-    32768,                    // Allocates a massive 32KB stack layout frame 
+    "CockpitTask",            // Descriptive tag
+    32768,                    // Allocates massive 32KB stack layout
     NULL,                     // Task parameters input
-    1,                        // Task Priority level execution ranking
+    0,                        // ◄ CHANGE THIS FROM 1 TO 0 (Idle/Low Priority)
     &CockpitTaskHandle,       // Thread handle tracking variable
-    1                         // Pin the entire execution timeline strictly to Core 1
+    1                         // Pin to Core 1
   );
   
   Serial.println("=== SYSTEM PRE-FLIGHT INITIALIZATION COMPLETED CLEANLY ===");
@@ -353,20 +379,54 @@ void loop() {
   static uint32_t last_cleanup = 0;
   if (millis() - last_cleanup > 1000) {
     last_cleanup = millis();
-    ws.cleanupClients(); 
+    ws.cleanupClients();
   }
 
-  // If Core 1 has marked a packet as ready, transmit it safely here
+  // --- BENCH DESK SHORTCUT COMMAND INJECTOR ---
+  if (Serial.available() > 0) {
+    String testVin = Serial.readStringUntil('\n');
+    testVin.trim(); // Clean trailing whitespace feeds safely
+    
+    if (testVin.length() == 17) {
+        Serial.println("\n[DEBUG] Injecting Bench Test VIN into Profile Matrix...");
+        decodeAndPrintVehicleIdentity(testVin.c_str());
+        
+        // Dynamically recalculate and apply the visual display scales on your desk!
+        if (sys_ctx != nullptr && sys_ctx->interpreter != nullptr) {
+            sys_ctx->interpreter->configureUiLimits();
+            Serial.println("[DEBUG] UI morphing execution complete.");
+        }
+    } else {
+        Serial.println("[DEBUG] Invalid VIN footprint. Must be exactly 17 characters long.");
+    }
+  }
+
+  // --- FIXED TELEMETRY SWEEP INTERFACE GATING ---
+  // (Removed the network family restrictions so it continues sweeping across ALL bench testing profiles!)
+  {
+      static float mock_rpm = 800.0;
+      static bool ascending = true;
+
+      if (ascending) {
+          mock_rpm += 25.0;
+          if (mock_rpm >= 5500.0) ascending = false;
+      } else {
+          mock_rpm -= 25.0;
+          if (mock_rpm <= 800.0) ascending = true;
+      }
+
+      // Continuously inject Engine RPM, Turbo Boost, Oil Temp, and Coolant Temp values
+      runBenchTelemetrySimulation(mock_rpm, 1.25, 95.0, 90.0);
+  }
+
+  // If Core 1 has marked a web data packet as ready, dispatch it here
   if (ws_payload_ready) {
     if (ws.count() > 0 && ws.availableForWriteAll()) {
-      
-      // FIX: Transmit the static character array cleanly as a raw text string
-      ws.textAll(global_ws_buffer); 
+      ws.textAll(global_ws_buffer);
     }
-    ws_payload_ready = false; // Reset the flag so Core 1 can write the next frame
+    ws_payload_ready = false; 
   }
-  
-  delay(1); 
+  delay(1);
 }
 
 
@@ -376,143 +436,128 @@ void loop() {
 // RADIAL DASHBOARD CONTEXT MATRIX (LVGL ENGINE BUILD)
 // -------------------------------------------------------------
 void buildCockpitUI() {
-  // Construct Custom Theme Profiles
-  color_cool_blue = lv_color_make(0, 150, 255);
-  color_normal_green = lv_color_make(50, 200, 50);
-  color_alert_red = lv_color_make(255, 30, 30);
+  // Construct Master Tabview Environment using pointer arrows
+  sys_ctx->tv = lv_tabview_create(lv_scr_act(), LV_DIR_TOP, 0);
+  lv_obj_t *t1 = lv_tabview_add_tab(sys_ctx->tv, "PERFORMANCE");
+  lv_obj_t *t2 = lv_tabview_add_tab(sys_ctx->tv, "CONVENIENCE");
+  lv_obj_t *t3 = lv_tabview_add_tab(sys_ctx->tv, "INFOTAINMENT");
 
-  // Create Horizontal 3-Tab Touch Panel Layout
-  tv = lv_tabview_create(lv_scr_act(), LV_DIR_TOP, 40);
-  lv_obj_t *tab1 = lv_tabview_add_tab(tv, "PERFORMANCE DIALS");
-  lv_obj_t *tab2 = lv_tabview_add_tab(tv, "BODY & COMFORT");
-  lv_obj_t *tab3 = lv_tabview_add_tab(tv, "RAW TRAFFIC MON");
+  // Style overall dashboard black background matrix
+  lv_obj_set_style_bg_color(lv_scr_act(), lv_color_black(), 0);
+  lv_obj_set_style_bg_color(t1, lv_color_black(), 0);
+  lv_obj_set_style_bg_color(t2, lv_color_black(), 0);
+  lv_obj_set_style_bg_color(t3, lv_color_black(), 0);
 
-  // --- 1. TACHOMETER DESIGN ELEMENT (RPM RADIAL SWEEP) ---
-  rpm_meter = lv_arc_create(tab1);
-  lv_obj_set_size(rpm_meter, 150, 150);
-  lv_arc_set_rotation(rpm_meter, 135);
-  lv_arc_set_bg_angles(rpm_meter, 0, 270);
-  lv_arc_set_range(rpm_meter, 0, 8000); 
-  lv_obj_align(rpm_meter, LV_ALIGN_LEFT_MID, 20, -20);
-  lv_obj_remove_style(rpm_meter, NULL, LV_PART_KNOB); 
-
-  lbl_rpm_val = lv_label_create(tab1);
-  lv_obj_align_to(lbl_rpm_val, rpm_meter, LV_ALIGN_CENTER, 0, 0);
-  lv_label_set_text(lbl_rpm_val, "0\nRPM");
-
-  // --- 2. TURBOCHARGER PRESSURE ELEMENT (VERTICAL STATUS BAR) ---
-  boost_meter = lv_bar_create(tab1);
-  lv_obj_set_size(boost_meter, 30, 130);
-  lv_bar_set_range(boost_meter, 0, 250); // Maps 0.00 to 2.50 bar absolute boost limits
-  lv_obj_align(boost_meter, LV_ALIGN_CENTER, 0, -20);
-
-  lbl_boost_val = lv_label_create(tab1);
-  lv_obj_align_to(lbl_boost_val, boost_meter, LV_ALIGN_OUT_BOTTOM_MID, 0, 10);
-  lv_label_set_text(lbl_boost_val, "0.00 Bar\nPK: 0.00 B");
+  // =========================================================================
+  // TAB 1: RADIAL INSTRUMENTS & DIALS
+  // =========================================================================
   
-  // Make the label interactive to clear Peak history memory when tapped
-  lv_obj_add_flag(lbl_boost_val, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_add_event_cb(lbl_boost_val, handleBoostResetTouch, LV_EVENT_CLICKED, NULL);
+  // Allocate Engine Tachometer to Context Pointer
+  sys_ctx->rpm_meter = lv_arc_create(t1);
+  lv_obj_set_size(sys_ctx->rpm_meter, 220, 220);
+  lv_obj_align(sys_ctx->rpm_meter, LV_ALIGN_LEFT_MID, 10, -20);
+  lv_arc_set_bg_angles(sys_ctx->rpm_meter, 135, 45);
+  lv_obj_remove_style(sys_ctx->rpm_meter, NULL, LV_PART_KNOB);
+  lv_obj_clear_flag(sys_ctx->rpm_meter, LV_OBJ_FLAG_CLICKABLE);
 
-  // --- 3. DUAL THERMAL PASS METER (SPLIT OVERLAPPING COCKPIT ARCS) ---
-  // Outer Layer Radial: Engine Oil Temperature Status
-  oil_arc = lv_arc_create(tab1);
-  lv_obj_set_size(oil_arc, 150, 150);
-  lv_arc_set_rotation(oil_arc, 180);
-  lv_arc_set_bg_angles(oil_arc, 0, 180); 
-  lv_arc_set_range(oil_arc, 40, 150);    
-  lv_obj_align(oil_arc, LV_ALIGN_RIGHT_MID, -20, -20);
-  lv_obj_remove_style(oil_arc, NULL, LV_PART_KNOB);
+  // Allocate Boost Pressure Component to Context Pointer
+  sys_ctx->boost_meter = lv_bar_create(t1);
+  lv_obj_set_size(sys_ctx->boost_meter, 30, 160);
+  lv_obj_align(sys_ctx->boost_meter, LV_ALIGN_RIGHT_MID, -140, -20);
+  
+  // Allocate Thermal Arcs to Context Pointers
+  sys_ctx->oil_arc = lv_arc_create(t1);
+  lv_obj_set_size(sys_ctx->oil_arc, 90, 90);
+  lv_obj_align(sys_ctx->oil_arc, LV_ALIGN_RIGHT_MID, -20, -60);
+  lv_arc_set_bg_angles(sys_ctx->oil_arc, 135, 45);
+  lv_arc_set_range(sys_ctx->oil_arc, 50, 150);
+  lv_obj_remove_style(sys_ctx->oil_arc, NULL, LV_PART_KNOB);
 
-  // Inner Layer Radial: Engine Engine Coolant Line Status
-  coolant_arc = lv_arc_create(tab1);
-  lv_obj_set_size(coolant_arc, 110, 110);
-  lv_arc_set_rotation(coolant_arc, 180);
-  lv_arc_set_bg_angles(coolant_arc, 0, 180);
-  lv_arc_set_range(coolant_arc, 40, 120);
-  lv_obj_align_to(coolant_arc, oil_arc, LV_ALIGN_CENTER, 0, 0);
-  lv_obj_remove_style(coolant_arc, NULL, LV_PART_KNOB);
+  sys_ctx->coolant_arc = lv_arc_create(t1);
+  lv_obj_set_size(sys_ctx->coolant_arc, 90, 90);
+  lv_obj_align(sys_ctx->coolant_arc, LV_ALIGN_RIGHT_MID, -20, 50);
+  lv_arc_set_bg_angles(sys_ctx->coolant_arc, 135, 45);
+  lv_arc_set_range(sys_ctx->coolant_arc, 50, 130);
+  lv_obj_remove_style(sys_ctx->coolant_arc, NULL, LV_PART_KNOB);
 
-  lbl_temps_val = lv_label_create(tab1);
-  lv_obj_align_to(lbl_temps_val, oil_arc, LV_ALIGN_OUT_BOTTOM_MID, 0, 15);
-  lv_label_set_text(lbl_temps_val, "Oil: --°C | H2O: --°C");
+  // Text Data Readout Value Overlays
+  lbl_rpm_val = lv_label_create(sys_ctx->rpm_meter);
+  lv_obj_align(lbl_rpm_val, LV_ALIGN_CENTER, 0, 0);
+  lv_obj_set_style_text_color(lbl_rpm_val, lv_color_white(), 0);
 
-  // --- TAB BACKLOG MONITORING FIELDS ---
-  label_comfort = lv_label_create(tab2);
-  lv_obj_align(label_comfort, LV_ALIGN_TOP_LEFT, 10, 10);
+  lbl_boost_val = lv_label_create(t1);
+  lv_obj_align_to(lbl_boost_val, sys_ctx->boost_meter, LV_ALIGN_OUT_BOTTOM_MID, 0, 10);
+  lv_obj_set_style_text_color(lbl_boost_val, lv_color_white(), 0);
 
-  label_infotainment = lv_label_create(tab3);
-  lv_obj_align(label_infotainment, LV_ALIGN_TOP_LEFT, 10, 10);
+  lbl_temps_val = lv_label_create(t1);
+  lv_obj_align(lbl_temps_val, LV_ALIGN_RIGHT_MID, -10, -5);
+  lv_obj_set_style_text_color(lbl_temps_val, lv_color_white(), 0);
 
-  if (currentCarInterpreter != NULL) {
-        currentCarInterpreter->configureUiLimits();
-        Serial.println("[UI ENGINE] Dynamic UI constraints and graphics mappings applied successfully.");
-    }
+  // Add Interactive Touch Handler Reset Hook for Peak Value
+  lv_obj_add_flag(sys_ctx->boost_meter, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_event_cb(sys_ctx->boost_meter, handleBoostResetTouch, LV_EVENT_CLICKED, NULL);
+
+  // =========================================================================
+  // TAB 2 & TAB 3: CONVENIENCE AND INFOTAINMENT READOUT LABELS
+  // =========================================================================
+  label_comfort = lv_label_create(t2);
+  lv_obj_align(label_comfort, LV_ALIGN_CENTER, 0, 0);
+  lv_obj_set_style_text_color(label_comfort, lv_color_white(), 0);
+
+  label_infotainment = lv_label_create(t3);
+  lv_obj_align(label_infotainment, LV_ALIGN_CENTER, 0, 0);
+  lv_obj_set_style_text_color(label_infotainment, lv_color_white(), 0);
+
+  // =========================================================================
+  // DYNAMIC ARCHITECTURE LOOKUP IMPLEMENTATION
+  // =========================================================================
+  if (sys_ctx->interpreter != nullptr) {
+    sys_ctx->interpreter->configureUiLimits();
+    Serial.println("[UI ENGINE] Dynamic vehicle profile scales and color palettes applied.");
+  }
 }
 
 // -------------------------------------------------------------
 // METRIC EXTRACTION REDRAW LOGIC CYCLE
 // -------------------------------------------------------------
 void updateUIElements() {
-  char buf[128];
-
-  // 1. TACHOMETER REDLINE SWAP LOGIC 
-  lv_arc_set_value(rpm_meter, (int)s3_live_metrics.engine_rpm);
-  snprintf(buf, sizeof(buf), "%d\nRPM", (int)s3_live_metrics.engine_rpm);
+  // FIXED: Expanded from a single bare 'char' to a robust 32-byte character array buffer
+  char buf[32]; 
+  
+  // 1. Sync Live Engine RPM Dials
+  if (sys_ctx->rpm_meter != nullptr) {
+    lv_arc_set_value(sys_ctx->rpm_meter, (int)sys_ctx->metrics.engine_rpm);
+  }
+  snprintf(buf, sizeof(buf), "%.0f RPM", sys_ctx->metrics.engine_rpm);
   lv_label_set_text(lbl_rpm_val, buf);
 
-  if (s3_live_metrics.engine_rpm >= 6500.0) {
-    lv_obj_set_style_arc_color(rpm_meter, color_alert_red, LV_PART_INDICATOR);
-  } else {
-    lv_obj_set_style_arc_color(rpm_meter, color_normal_green, LV_PART_INDICATOR);
-  }
-
-  // 2. BOOST PRESSURE DISPLAY & HISTORICAL HIGHEST LOG
-  if (s3_live_metrics.boost_bar > s3_live_metrics.peak_boost_bar) {
-    s3_live_metrics.peak_boost_bar = s3_live_metrics.boost_bar;
+  // 2. Track Peak Boost Metrics Safely
+  if (sys_ctx->metrics.boost_bar > sys_ctx->metrics.peak_boost_bar) {
+    sys_ctx->metrics.peak_boost_bar = sys_ctx->metrics.boost_bar;
   }
   
-  lv_bar_set_value(boost_meter, (int)(s3_live_metrics.boost_bar * 100), LV_ANIM_OFF);
-  snprintf(buf, sizeof(buf), "%.2f Bar\nPK: %.2f B", s3_live_metrics.boost_bar, s3_live_metrics.peak_boost_bar);
+  if (sys_ctx->boost_meter != nullptr) {
+    lv_bar_set_value(sys_ctx->boost_meter, (int)(sys_ctx->metrics.boost_bar * 100), LV_ANIM_OFF);
+  }
+  snprintf(buf, sizeof(buf), "%.2f Bar\nPK: %.2f B", sys_ctx->metrics.boost_bar, sys_ctx->metrics.peak_boost_bar);
   lv_label_set_text(lbl_boost_val, buf);
 
-  // 3. THERMAL MAP DYNAMIC GRADIENTS
-  lv_arc_set_value(oil_arc, s3_live_metrics.oil_temp);
-  lv_arc_set_value(coolant_arc, s3_live_metrics.coolant_temp);
-  
-  // Evaluate Engine Oil
-  if (s3_live_metrics.oil_temp < 75) {
-    lv_obj_set_style_arc_color(oil_arc, color_cool_blue, LV_PART_INDICATOR);
-  } else if (s3_live_metrics.oil_temp >= 75 && s3_live_metrics.oil_temp <= 115) {
-    lv_obj_set_style_arc_color(oil_arc, color_normal_green, LV_PART_INDICATOR);
-  } else {
-    lv_obj_set_style_arc_color(oil_arc, color_alert_red, LV_PART_INDICATOR);
+  // 3. Sync Dynamic Thermal Engine Arcs
+  if (sys_ctx->oil_arc != nullptr) {
+    lv_arc_set_value(sys_ctx->oil_arc, (int)sys_ctx->metrics.oil_temp);
   }
-
-  // Evaluate Coolant System
-  if (s3_live_metrics.coolant_temp < 70) {
-    lv_obj_set_style_arc_color(coolant_arc, color_cool_blue, LV_PART_INDICATOR);
-  } else if (s3_live_metrics.coolant_temp >= 70 && s3_live_metrics.coolant_temp <= 105) {
-    lv_obj_set_style_arc_color(coolant_arc, color_normal_green, LV_PART_INDICATOR);
-  } else {
-    lv_obj_set_style_arc_color(coolant_arc, color_alert_red, LV_PART_INDICATOR);
+  if (sys_ctx->coolant_arc != nullptr) {
+    lv_arc_set_value(sys_ctx->coolant_arc, (int)sys_ctx->metrics.coolant_temp);
   }
-
-  snprintf(buf, sizeof(buf), "Oil: %d°C  |  H2O: %d°C", s3_live_metrics.oil_temp, s3_live_metrics.coolant_temp);
+  snprintf(buf, sizeof(buf), "OIL: %.0f C\nH2O: %.0f C", sys_ctx->metrics.oil_temp, sys_ctx->metrics.coolant_temp);
   lv_label_set_text(lbl_temps_val, buf);
 
-  // 4. SECONDARY DOMAIN CONVERSION LOG STRINGS
-  snprintf(buf, sizeof(buf), 
-           "BCM CHASSIS DATA INTERFACE\n\n"
-           "Driver Front Door State: %s\n"
-           "Target Climatronic Air Volume: %.1f °C", 
-           s3_live_metrics.driver_door_open ? "OPEN" : "CLOSED", s3_live_metrics.target_temp);
+  // 4. Update Peripheral Text Containers
+  snprintf(buf, sizeof(buf), "DRV DOOR: %s  |  TGT: %.1f C", 
+           sys_ctx->metrics.driver_door_open ? "OPEN" : "CLOSED", sys_ctx->metrics.target_temp);
   lv_label_set_text(label_comfort, buf);
 
-  snprintf(buf, sizeof(buf), 
-           "LAST CAPTURED MEDIA DATA VECTOR\n\n"
-           "MMI Steering Input Vector Code: 0x%X\n"
-           "Diagnostic Status Matrix Link: ONLINE", s3_live_metrics.mmi_key_code);
+  snprintf(buf, sizeof(buf), "MMI VOL WHEEL HEX INPUT VECTOR: 0x%02X", sys_ctx->metrics.mmi_key_code);
   lv_label_set_text(label_infotainment, buf);
 }
 
@@ -527,7 +572,7 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventTyp
       data[len] = 0; 
       
       if (strcmp((char*)data, "RESET_PEAK") == 0) {
-        s3_live_metrics.peak_boost_bar = 0.0; 
+        sys_ctx->metrics.peak_boost_bar = 0.0;
         
         // FIX: Removed client->id() to prevent string conversion pointer faults
         Serial.println("[WEB EVENT] Peak Turbo metrics zeroed out via remote command.");
@@ -548,7 +593,7 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventTyp
 // EVENT CALLBACK REGISTER PATHS
 // -------------------------------------------------------------
 static void handleBoostResetTouch(lv_event_t * e) {
-  s3_live_metrics.peak_boost_bar = 0.0; 
+  sys_ctx->metrics.peak_boost_bar = 0.0;
   Serial.println("[UI EVENT] Historical Peak Boost memory register zeroed out.");
 }
 
@@ -652,7 +697,7 @@ bool runBootDiagnostic(int port_idx, int tx_pin, int rx_pin, const char* label) 
 }
 
 void decodeAndPrintVehicleIdentity(const char* vin) {
-     if (strlen(vin) < 17) return;
+    if (strlen(vin) < 17) return;
 
     // 1. EXTRACT WORLD MANUFACTURER IDENTIFIER (WMI)
     if (strncmp(vin, "WAU", 3) == 0) active_vehicle_profile.brand = "AUDI AG (GERMANY)";
@@ -689,7 +734,8 @@ void decodeAndPrintVehicleIdentity(const char* vin) {
     else if (strcmp(chassis, "GA") == 0) { active_vehicle_profile.model_name = "Audi Q2 Compact Crossover"; active_vehicle_profile.electrical_bus = "HIGH-SPEED MQB CAN"; active_vehicle_profile.network_generation = SERIES_MQB_A_CLASS; }
     else if (strcmp(chassis, "8X") == 0) { active_vehicle_profile.model_name = "Audi A1 Supermini (PQ25)"; active_vehicle_profile.electrical_bus = "CAN-TP2.0 COMPACT"; active_vehicle_profile.network_generation = SERIES_SMALL_PO_SKODA; }
     else if (strcmp(chassis, "GB") == 0) { active_vehicle_profile.model_name = "Audi A1 Sportback (MQB A0)"; active_vehicle_profile.electrical_bus = "HIGH-SPEED MQB CAN"; active_vehicle_profile.network_generation = SERIES_SMALL_PO_SKODA; }
-
+    else if (strcmp(chassis, "4L") == 0) { active_vehicle_profile.model_name = "Audi Q7 SUV (PQ47 4L Chassis)"; active_vehicle_profile.electrical_bus = "CAN-TP2.0 INFRASTRUCTURE"; active_vehicle_profile.network_generation = SERIES_PQ35_46_LEGACY; }
+    
     // --- VOLKSWAGEN DIVISION ---
     else if (strcmp(chassis, "1K") == 0 || strcmp(chassis, "5K") == 0 || strcmp(chassis, "AJ") == 0) { active_vehicle_profile.model_name = "VW Golf Mk5 / Mk6 / Jetta"; active_vehicle_profile.electrical_bus = "CAN-TP2.0 POWERTRAIN"; active_vehicle_profile.network_generation = SERIES_PQ35_46_LEGACY; }
     else if (strcmp(chassis, "5G") == 0 || strcmp(chassis, "BA") == 0 || strcmp(chassis, "AM") == 0) { active_vehicle_profile.model_name = "VW Golf Mk7 / GTI / Golf R (MQB)"; active_vehicle_profile.electrical_bus = "HIGH-SPEED MQB CAN"; active_vehicle_profile.network_generation = SERIES_MQB_A_CLASS; }
@@ -707,60 +753,39 @@ void decodeAndPrintVehicleIdentity(const char* vin) {
     else if (strcmp(chassis, "3H") == 0) { active_vehicle_profile.model_name = "VW Arteon GranTurismo"; active_vehicle_profile.electrical_bus = "HIGH-SPEED MQB CAN"; active_vehicle_profile.network_generation = SERIES_MQB_A_CLASS; }
 
     // --- SEAT / CUPRA ---
-        else if (strcmp(chassis, "1P") == 0) { active_vehicle_profile.model_name = "Seat Leon Cupra (Mk2 PQ35)"; active_vehicle_profile.electrical_bus = "CAN-TP2.0 POWERTRAIN"; active_vehicle_profile.network_generation = SERIES_PQ35_46_LEGACY; }
+
+    else if (strcmp(chassis, "1P") == 0) { active_vehicle_profile.model_name = "Seat Leon Cupra (Mk2 PQ35)"; active_vehicle_profile.electrical_bus = "CAN-TP2.0 POWERTRAIN"; active_vehicle_profile.network_generation = SERIES_PQ35_46_LEGACY; }
     else if (strcmp(chassis, "5F") == 0) { active_vehicle_profile.model_name = "Seat Leon FR / Cupra (Mk3 MQB)"; active_vehicle_profile.electrical_bus = "HIGH-SPEED MQB CAN"; active_vehicle_profile.network_generation = SERIES_MQB_A_CLASS; }
     else if (strcmp(chassis, "KL") == 0) { active_vehicle_profile.model_name = "Cupra Leon / Formentor (Mk4 MQB EVO)"; active_vehicle_profile.electrical_bus = "MQB EVO HIGH-SPEED CAN"; active_vehicle_profile.network_generation = SERIES_MQB_A_CLASS; }
     else if (strcmp(chassis, "KJ") == 0) { active_vehicle_profile.model_name = "Seat Ibiza / Arona (MQB A0)"; active_vehicle_profile.electrical_bus = "HIGH-SPEED MQB CAN"; active_vehicle_profile.network_generation = SERIES_SMALL_PO_SKODA; }
-    
+
     // --- SKODA AUTOMOTIVE ---
     else if (strcmp(chassis, "1Z") == 0) { active_vehicle_profile.model_name = "Skoda Octavia vRS (Mk2 PQ35)"; active_vehicle_profile.electrical_bus = "CAN-TP2.0 POWERTRAIN"; active_vehicle_profile.network_generation = SERIES_PQ35_46_LEGACY; }
     else if (strcmp(chassis, "5E") == 0) { active_vehicle_profile.model_name = "Skoda Octavia vRS (Mk3 MQB)"; active_vehicle_profile.electrical_bus = "HIGH-SPEED MQB CAN"; active_vehicle_profile.network_generation = SERIES_MQB_A_CLASS; }
     else if (strcmp(chassis, "NX") == 0) { active_vehicle_profile.model_name = "Skoda Octavia vRS (Mk4 MQB EVO)"; active_vehicle_profile.electrical_bus = "MQB EVO HIGH-SPEED CAN"; active_vehicle_profile.network_generation = SERIES_MQB_A_CLASS; }
     else if (strcmp(chassis, "3T") == 0) { active_vehicle_profile.model_name = "Skoda Superb Saloon (3T)"; active_vehicle_profile.electrical_bus = "CAN-TP2.0 INFRASTRUCTURE"; active_vehicle_profile.network_generation = SERIES_PQ35_46_LEGACY; }
     else if (strcmp(chassis, "3V") == 0) { active_vehicle_profile.model_name = "Skoda Superb (MQB Matrix)"; active_vehicle_profile.electrical_bus = "HIGH-SPEED MQB CAN"; active_vehicle_profile.network_generation = SERIES_MQB_A_CLASS; }
-    
+
     // --- PORSCHE MATRIX ---
     else if (strcmp(chassis, "92") == 0) { active_vehicle_profile.model_name = "Porsche Cayenne SUV (92A)"; active_vehicle_profile.electrical_bus = "MLB-INFRASTRUCTURE CAN"; active_vehicle_profile.network_generation = SERIES_MLB_LONG_CLASS; }
     else if (strcmp(chassis, "9B") == 0) { active_vehicle_profile.model_name = "Porsche Macan Crossover (95B)"; active_vehicle_profile.electrical_bus = "MLB-INFRASTRUCTURE CAN"; active_vehicle_profile.network_generation = SERIES_MLB_LONG_CLASS; }
-    
+
     // 3. MAP MODEL YEAR CHARACTER INDICES (POSITION 10)
     char year_char = vin[9];
-    if (year_char >= 'D' && year_char <= 'H') {
-       // D=2013, E=2014, F=2015, G=2016, H=2017 
-       active_vehicle_profile.production_year = 2013 + (year_char - 'D');
-    } 
+    if (year_char >= 'B' && year_char <= 'H') {
+        active_vehicle_profile.production_year = 2011 + (year_char - 'B');
+    }
     else if (year_char >= 'J' && year_char <= 'N') {
-       // J=2018, K=2019, L=2020, M=2021, N=2022 (Skips 'I') 
-       active_vehicle_profile.production_year = 2018 + (year_char - 'J');
+        active_vehicle_profile.production_year = 2018 + (year_char - 'J');
     }
     else if (year_char >= 'P' && year_char <= 'R') {
-       // P=2023, R=2024 (Skips 'O', 'Q') 
-       active_vehicle_profile.production_year = 2023 + (year_char - 'P');
+        active_vehicle_profile.production_year = 2023 + (year_char - 'P');
     }
     else if (year_char == 'S') {
-       active_vehicle_profile.production_year = 2025;
+        active_vehicle_profile.production_year = 2025;
     }
     else if (year_char == 'T') {
-       active_vehicle_profile.production_year = 2026;
-    }
-    
-    // Clear out any stale instance leftovers from memory space cleanly
-    if (currentCarInterpreter != NULL) {
-        delete currentCarInterpreter;
-    }
-
-    // Allocate the dynamic object profile based on the verified chassis identification bits
-    if (active_vehicle_profile.network_generation == SERIES_MQB_A_CLASS) {
-        currentCarInterpreter = new AudiS38VInterpreter();
-        Serial.println("[DECOUPLER] Dynamic Instance Allocation: AudiS38VInterpreter class loaded cleanly.");
-    }
-    else if (active_vehicle_profile.network_generation == SERIES_PQ35_46_LEGACY) {
-        currentCarInterpreter = new AudiS38PInterpreter();
-        Serial.println("[DECOUPLER] Dynamic Instance Allocation: AudiS38PInterpreter (PQ35) class loaded cleanly.");
-      }
-       else {
-        currentCarInterpreter = new GenericVehicleInterpreter();
-        Serial.println("[DECOUPLER] Dynamic Instance Allocation: Loading Generic Baseline Interface.");
+        active_vehicle_profile.production_year = 2026;
     }
 
     // Print Detailed Metadata Trace out to the Console Buffer
@@ -772,24 +797,73 @@ void decodeAndPrintVehicleIdentity(const char* vin) {
     Serial.print("  ELECTRICAL BUS TYPE : "); Serial.println(active_vehicle_profile.electrical_bus);
     Serial.print("  PRODUCTION YEAR     : "); Serial.println(active_vehicle_profile.production_year);
     Serial.println("=======================================================\n");
-  }
+
+    // --- LINK THE CLASS OBJECT ALLOCATION INSIDE THE SYSTEM CONTEXT CONTAINER ---
+     if (sys_ctx->interpreter != nullptr) {
+        delete sys_ctx->interpreter; // Safely garbage collect standard baseline instance
+    }
+
+    if (active_vehicle_profile.network_generation == SERIES_MQB_A_CLASS) {
+        sys_ctx->interpreter = new AudiS38VInterpreter(); // Loads MQB translations class
+        Serial.println("[DECOUPLER] Dynamic Instance Allocation: AudiS38VInterpreter class loaded cleanly.");
+    } 
+    else if (active_vehicle_profile.network_generation == SERIES_PQ35_46_LEGACY) {
+        if (strcmp(chassis, "4L") == 0) {
+            sys_ctx->interpreter = new AudiQ74LInterpreter();
+            Serial.println("[DECOUPLER] Dynamic Instance Allocation: AudiQ74LInterpreter (4L) class loaded cleanly.");
+        } else {
+            sys_ctx->interpreter = new AudiS38PInterpreter();
+            Serial.println("[DECOUPLER] Dynamic Instance Allocation: AudiS38PInterpreter (8P) class loaded cleanly.");
+        }
+    } 
+    else {
+        sys_ctx->interpreter = new GenericVehicleInterpreter(); // Bench default fallback
+        Serial.println("[DECOUPLER] Dynamic Instance Allocation: Reverting to Generic Baseline Interface.");
+    }
+}
 
 
 void startTwaiChannel(int port_idx, int tx_pin, int rx_pin) {
   twai_general_config_t g_cfg = TWAI_GENERAL_CONFIG_DEFAULT((gpio_num_t)tx_pin, (gpio_num_t)rx_pin, TWAI_MODE_NORMAL);
   
-  // Explicitly map target layout channel assignment to hardware layout registers
+  // Explicitly map target layout channel assignment to hardware registers
   g_cfg.controller_id = port_idx; 
   
   twai_timing_config_t t_cfg = TWAI_TIMING_CONFIG_500KBITS();
-  twai_filter_config_t f_cfg = TWAI_FILTER_CONFIG_ACCEPT_ALL();
+  twai_filter_config_t f_cfg;
+
+  // --- DYNAMIC HARDWARE ACCEPTANCE FILTERING ---
+  if (port_idx == 0) {
+      // Channel 0: Drive Train Bus Filter
+      // We set a loose mask to allow standard engine IDs (0x000-0x3FF) AND UDS Diagnostic IDs (0x7E8-0x7EF)
+      f_cfg.acceptance_code = (0x000 << 21);
+      f_cfg.acceptance_mask = ~((0x7F0) << 21); // Mask matches the high bits to let diagnostic/powertrain pass
+      f_cfg.single_filter = true;
+  } 
+  else if (port_idx == 1) {
+      // Channel 1: Comfort Convenience Bus Filter
+      // Captures 0x300 through 0x6FF ranges safely, blocking thousands of high-frequency lighting/radar frames
+      f_cfg.acceptance_code = (0x300 << 21);
+      f_cfg.acceptance_mask = ~((0x700) << 21);
+      f_cfg.single_filter = true;
+  } 
+  else if (port_idx == 2) {
+      // Channel 2: Infotainment / Multimedia Bus Filter
+      // Filters strictly for button matrices, screen updates, and wheel scrolling streams
+      f_cfg.acceptance_code = (0x500 << 21);
+      f_cfg.acceptance_mask = ~((0x700) << 21);
+      f_cfg.single_filter = true;
+  } 
+  else {
+      // Fallback fallback safety configuration
+      f_cfg = TWAI_FILTER_CONFIG_ACCEPT_ALL();
+  }
   
-  // Removed invalid (twai_port_num_t) typecast
+  // Install the reconfigured filter registers and fire up the driver chip
   twai_driver_install_v2(&g_cfg, &t_cfg, &f_cfg, &twai_ports[port_idx]);
   
-  // Check hardware initialization status explicitly on boot
   if (twai_start_v2(twai_ports[port_idx]) == ESP_OK) {
-      Serial.printf("[SYSTEM] CAN Channel %d (TX:%d, RX:%d) initialized and started successfully.\n", port_idx, tx_pin, rx_pin);
+      Serial.printf("[SYSTEM] CAN Channel %d (TX:%d, RX:%d) safely isolated and started.\n", port_idx, tx_pin, rx_pin);
   } else {
       Serial.printf("[CRITICAL] Failed to activate hardware registers for CAN Channel %d\n", port_idx);
   }
@@ -811,32 +885,33 @@ void processInboundFrames(int port_idx, const char* networkName) {
             Serial.print(msg.data[i], HEX);
             Serial.print(" ");
         }
-        Serial.println(); // Terminate the hex monitor dump trace line cleanly
+        Serial.println(); // Terminate the hex monitor line cleanly
 
-        // 2. Redirect Traffic Vectors to Corresponding Class Dynamic Sub-Interpreters
-        if (currentCarInterpreter != NULL) {
-            if (port_idx == 0)      currentCarInterpreter->interpretDriveTrain(msg);
-            else if (port_idx == 1) currentCarInterpreter->interpretComfort(msg);
-            else if (port_idx == 2) currentCarInterpreter->interpretInfotainment(msg);
+        // 2. Redirect Traffic Vectors directly through the sys_ctx tracking handle
+            if (sys_ctx->interpreter != nullptr && active_vehicle_profile.network_generation != SERIES_UNKNOWN) {
+            if (port_idx == 0)      sys_ctx->interpreter->interpretDriveTrain(msg);
+            else if (port_idx == 1) sys_ctx->interpreter->interpretComfort(msg);
+            else if (port_idx == 2) sys_ctx->interpreter->interpretInfotainment(msg);
         }
     }
-  }
+}
+
     // -------------------------------------------------------------// ASYNCHRONOUS ACOUSTIC AUDIO ENGINE (NON-BLOCKING)// -------------------------------------------------------------
-    void runAcousticAlertEngine() 
-    {
-      if (s3_live_metrics.oil_temp > MAX_SAFE_OIL_TEMP || s3_live_metrics.coolant_temp > MAX_SAFE_COOLANT_TEMP)
-      {
-        alarm_sounding = true;
-       if (millis() - last_beep_time > 600) {last_beep_time = millis();tone(AUDIO_PWM_PIN, 2500, 150);
-       // Sound aggressive 2.5kHz chirp for 150ms
-       Serial.println("[SAFETY ALERT] Thermal limit breached! Active warning sound output.");
-      }
-    } 
-    else 
-    {
-      if (alarm_sounding) {noTone(AUDIO_PWM_PIN);digitalWrite(AUDIO_PWM_PIN, LOW);
-       // Kill residual amplifier hiss
-       alarm_sounding = false;
+void runAcousticAlertEngine() {
+  // Pull thresholds using the system context metrics fields with pointer arrows (->)
+  if (sys_ctx->metrics.oil_temp > MAX_SAFE_OIL_TEMP || sys_ctx->metrics.coolant_temp > MAX_SAFE_COOLANT_TEMP) {
+    alarm_sounding = true;
+    if (millis() - last_beep_time > 600) {
+      last_beep_time = millis();
+      tone(AUDIO_PWM_PIN, 2500, 150);
+      Serial.println("[SAFETY ALERT] Thermal limit breached! Active warning sound output.");
+    }
+  } 
+  else {
+    if (alarm_sounding) {
+      noTone(AUDIO_PWM_PIN);
+      digitalWrite(AUDIO_PWM_PIN, LOW);
+      alarm_sounding = false;
     }
   }
 }
