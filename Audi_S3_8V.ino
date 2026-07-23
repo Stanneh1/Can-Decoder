@@ -117,6 +117,12 @@ struct BenchVinSignature {
     const char* chassis;
 };
 
+struct BenchChassisYearRange {
+    const char* chassis;
+    int start_year;
+    int end_year;
+};
+
 static constexpr char kVinYearTokens[] = "123456789ABCDEFGHJKLMNPRSTVWXY";
 static constexpr uint32_t FULLTEST_STEP_INTERVAL_MS = 3000;
 static constexpr int FULLTEST_BASE_YEAR = 2001;
@@ -140,6 +146,30 @@ static const BenchVinSignature kBenchVinSignatures[] = {
     {"TMB", "1Z"}, {"TMB", "5E"}, {"TMB", "NX"}, {"TMB", "3T"}, {"TMB", "3V"},
     // Porsche
     {"WP0", "92"}, {"WP0", "9B"}
+};
+
+static const BenchChassisYearRange kBenchChassisYearRanges[] = {
+    // Audi
+    {"8P", 2003, 2012}, {"8V", 2013, 2020}, {"GY", 2020, FULLTEST_CURRENT_YEAR}, {"8Y", 2020, FULLTEST_CURRENT_YEAR},
+    {"8K", 2007, 2016}, {"8W", 2016, FULLTEST_CURRENT_YEAR}, {"F4", 2016, FULLTEST_CURRENT_YEAR},
+    {"4F", 2004, 2011}, {"4G", 2011, 2018}, {"4K", 2018, FULLTEST_CURRENT_YEAR},
+    {"8T", 2007, 2017}, {"8F", 2009, 2017}, {"4H", 2009, 2017}, {"4N", 2017, FULLTEST_CURRENT_YEAR},
+    {"8U", 2011, 2018}, {"F3", 2018, FULLTEST_CURRENT_YEAR}, {"8R", 2008, 2017}, {"FY", 2017, FULLTEST_CURRENT_YEAR},
+    {"4L", 2005, 2015}, {"4M", 2015, FULLTEST_CURRENT_YEAR}, {"8J", 2006, 2014}, {"8S", 2014, 2023},
+    {"GA", 2016, FULLTEST_CURRENT_YEAR}, {"8X", 2010, 2018}, {"GB", 2018, FULLTEST_CURRENT_YEAR},
+    // Volkswagen
+    {"1K", 2003, 2009}, {"5K", 2008, 2013}, {"AJ", 2005, 2015}, {"5G", 2012, 2021},
+    {"BA", 2012, 2021}, {"AM", 2012, 2021}, {"AU", 2012, 2021}, {"CD", 2019, FULLTEST_CURRENT_YEAR},
+    {"3C", 2005, 2010}, {"AN", 2010, 2015}, {"3G", 2014, FULLTEST_CURRENT_YEAR}, {"CB", 2014, FULLTEST_CURRENT_YEAR},
+    {"A3", 2023, FULLTEST_CURRENT_YEAR}, {"13", 2008, 2017}, {"5N", 2007, 2017},
+    {"AD", 2016, 2023}, {"AX", 2016, 2023}, {"CT", 2023, FULLTEST_CURRENT_YEAR},
+    {"6R", 2009, 2018}, {"6C", 2014, 2018}, {"AW", 2017, FULLTEST_CURRENT_YEAR}, {"3H", 2017, FULLTEST_CURRENT_YEAR},
+    // Seat / Cupra
+    {"1P", 2005, 2012}, {"5F", 2012, 2020}, {"KL", 2020, FULLTEST_CURRENT_YEAR}, {"KJ", 2017, FULLTEST_CURRENT_YEAR},
+    // Skoda
+    {"1Z", 2004, 2013}, {"5E", 2012, 2020}, {"NX", 2020, FULLTEST_CURRENT_YEAR}, {"3T", 2008, 2015}, {"3V", 2015, FULLTEST_CURRENT_YEAR},
+    // Porsche
+    {"92", 2010, 2018}, {"9B", 2014, 2023}
 };
 
 static bool g_fulltest_active = false;
@@ -171,13 +201,14 @@ bool isBenchYearValidForChassis(const char* chassis, int year) {
     // Enforce fixed current year cap for bench test sweeps.
     if (year > FULLTEST_CURRENT_YEAR) return false;
 
-    // A3/S3 generation sanity mapping so fulltest doesn't generate impossible
-    // combinations like "8P + 2023" or "8Y + 2008".
-    if (strcmp(chassis, "8P") == 0) return (year >= 2003 && year <= 2012);
-    if (strcmp(chassis, "8V") == 0) return (year >= 2013 && year <= 2020);
-    if (strcmp(chassis, "GY") == 0 || strcmp(chassis, "8Y") == 0) return (year >= 2020);
+    for (size_t i = 0; i < sizeof(kBenchChassisYearRanges) / sizeof(kBenchChassisYearRanges[0]); i++) {
+        const BenchChassisYearRange& range = kBenchChassisYearRanges[i];
+        if (strcmp(chassis, range.chassis) == 0) {
+            return year >= range.start_year && year <= range.end_year;
+        }
+    }
 
-    // For other signatures, keep sweep broad but still capped to current year.
+    // Unknown future signatures still get the broad sweep within the global cap.
     return year >= FULLTEST_BASE_YEAR;
 }
 
