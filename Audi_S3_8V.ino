@@ -821,7 +821,7 @@ void decodeAndPrintVehicleIdentity(const char* vin) {
         active_vehicle_profile.electrical_bus = "MLB-INFRASTRUCTURE CAN"; 
         active_vehicle_profile.network_generation = SERIES_MLB_LONG_CLASS; 
     }
-    else if (strcmp(chassis, "8W") == 0) { 
+    else if (strcmp(chassis, "8W") == 0 || strcmp(chassis, "F4") == 0) { 
         active_vehicle_profile.model_name = "Audi A4 / S4 / A5 / RS5 (MLB B9)"; 
         active_vehicle_profile.electrical_bus = "MLB EVO FLEXRAY/CAN"; 
         active_vehicle_profile.network_generation = SERIES_MLB_LONG_CLASS; 
@@ -918,7 +918,7 @@ void decodeAndPrintVehicleIdentity(const char* vin) {
         active_vehicle_profile.electrical_bus = "CAN-TP2.0 POWERTRAIN"; 
         active_vehicle_profile.network_generation = SERIES_PQ35_46_LEGACY; 
     }
-    else if (strcmp(chassis, "5G") == 0 || strcmp(chassis, "BA") == 0 || strcmp(chassis, "AM") == 0) { 
+    else if (strcmp(chassis, "5G") == 0 || strcmp(chassis, "BA") == 0 || strcmp(chassis, "AM") == 0 || strcmp(chassis, "AU") == 0) { 
         active_vehicle_profile.model_name = "VW Golf Mk7 / GTI / Golf R (MQB)"; 
         active_vehicle_profile.electrical_bus = "HIGH-SPEED MQB CAN"; 
         active_vehicle_profile.network_generation = SERIES_MQB_A_CLASS; 
@@ -1049,7 +1049,7 @@ void decodeAndPrintVehicleIdentity(const char* vin) {
     // =========================================================================
     // 3. UNIVERSAL MODEL YEAR LOOKUP ARRAY - POSITION 10
     // =========================================================================
-    char year_char = vin[10];
+    char year_char = vin[9];
     active_vehicle_profile.production_year = 0; // Baseline safety state
 
     // 1-to-1 sequential string index covering years 2001 through 2030 perfectly
@@ -1092,7 +1092,7 @@ void decodeAndPrintVehicleIdentity(const char* vin) {
     if (active_vehicle_profile.network_generation == SERIES_MQB_A_CLASS) {
         if (strcmp(chassis, "8V") == 0)       sys_ctx->interpreter = new AudiS38VInterpreter();
         else if (strcmp(chassis, "GY") == 0)  sys_ctx->interpreter = new AudiRS3GYInterpreter();
-        else if (strcmp(chassis, "5G") == 0 || strcmp(chassis, "BA") == 0 || strcmp(chassis, "AM") == 0) sys_ctx->interpreter = new VwGolf7Interpreter();
+        else if (strcmp(chassis, "5G") == 0 || strcmp(chassis, "BA") == 0 || strcmp(chassis, "AM") == 0 || strcmp(chassis, "AU") == 0) sys_ctx->interpreter = new VwGolf7Interpreter();
         else if (strcmp(chassis, "CD") == 0)  sys_ctx->interpreter = new VwGolf8Interpreter();
         else if (strcmp(chassis, "3G") == 0 || strcmp(chassis, "CB") == 0) sys_ctx->interpreter = new VwPassatB8Interpreter();
         else if (strcmp(chassis, "A3") == 0)  sys_ctx->interpreter = new VwPassatB9Interpreter();
@@ -1130,7 +1130,7 @@ void decodeAndPrintVehicleIdentity(const char* vin) {
     // --- GROUP 3: MLB LONGITUDINAL INFRASTRUCTURE CLASS MATRIX ---
     else if (active_vehicle_profile.network_generation == SERIES_MLB_LONG_CLASS) {
         if (strcmp(chassis, "8K") == 0)       sys_ctx->interpreter = new AudiA4MLB8KInterpreter();
-        else if (strcmp(chassis, "8W") == 0)  sys_ctx->interpreter = new AudiA4MLB8WInterpreter();
+        else if (strcmp(chassis, "8W") == 0 || strcmp(chassis, "F4") == 0)  sys_ctx->interpreter = new AudiA4MLB8WInterpreter();
         else if (strcmp(chassis, "4G") == 0)  sys_ctx->interpreter = new AudiA6MLBC7Interpreter();
         else if (strcmp(chassis, "4K") == 0)  sys_ctx->interpreter = new AudiA6MLBC8Interpreter();
         else if (strcmp(chassis, "8T") == 0 || strcmp(chassis, "8F") == 0) sys_ctx->interpreter = new AudiA5MLBB8Interpreter();
