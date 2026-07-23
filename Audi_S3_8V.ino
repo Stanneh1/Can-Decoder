@@ -68,6 +68,7 @@ static char global_ws_buffer[256]; // Allocates a fixed memory space block
 // fence needed on RISC-V (ESP32-P4) so the buffer writes are visible to Core 0
 // before it observes the flag as true.  Plain 'volatile' does NOT provide this.
 static std::atomic<bool> ws_payload_ready{false};
+static std::atomic<bool> ui_profile_refresh_pending{false};
 
 // --- MULTICORE SYNCHRONISATION PRIMITIVES ---
 // g_metrics_mux : protects sys_ctx->metrics fields (Core-0 bench-sim writes vs
@@ -180,6 +181,14 @@ static size_t g_fulltest_total_steps = 0;
 static size_t g_fulltest_completed_steps = 0;
 
 void applyUiProfileForCurrentInterpreter() {
+    // LVGL is not thread-safe. Queue the UI profile refresh so the cockpit task
+    // applies it on the same core/thread that already runs lv_timer_handler().
+    ui_profile_refresh_pending.store(true, std::memory_order_release);
+}
+
+void refreshUiProfileIfPending() {
+    if (!ui_profile_refresh_pending.exchange(false, std::memory_order_acq_rel)) return;
+
     if (g_interpreter_mutex != NULL) xSemaphoreTake(g_interpreter_mutex, portMAX_DELAY);
     if (sys_ctx != nullptr && sys_ctx->interpreter != nullptr) {
         sys_ctx->interpreter->configureUiLimits();
@@ -445,6 +454,7 @@ void CockpitCoreProcessor(void *pvParameters) {
   
   for(;;) {
     lv_timer_handler(); 
+    refreshUiProfileIfPending();
     
     processInboundFrames(0, "DRIVE TRAIN");
     processInboundFrames(1, "COMFORT");
