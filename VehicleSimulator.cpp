@@ -66,12 +66,10 @@ void runBenchTelemetrySimulation(float target_rpm, float target_boost, float tar
             twai_transmit_v2(*(twai_ports + 0), &tx_msg, 0);
 
             // C. Pack Boost Pressure to PQ Bus standard (ID: 0x380)
-            // M-2: Use uint16_t intermediate to avoid uint8_t overflow when
-            //      boost > ~1.4 Bar (absolute_mbar/10 > 255 wraps to near zero).
+            // M-2: Clamp to uint8_t range to prevent overflow above ~1.4 Bar.
             tx_msg.identifier = 0x380;
             int absolute_mbar = (int)((target_boost * 1000.0) + 1013.0);
-            uint16_t raw_byte_val = (uint16_t)(absolute_mbar / 10);
-            *(tx_msg.data + 0) = (raw_byte_val > 255) ? 255 : (uint8_t)raw_byte_val;
+            *(tx_msg.data + 0) = (uint8_t)((absolute_mbar / 10) > 255 ? 255 : (absolute_mbar / 10));
             for(int i = 1; i < 8; i++) *(tx_msg.data + i) = 0x00;
             twai_transmit_v2(*(twai_ports + 0), &tx_msg, 0);
         }

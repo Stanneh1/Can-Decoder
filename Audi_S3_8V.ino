@@ -27,9 +27,11 @@
 // #define DEBUG_CAN_FRAMES
 
 // --- WI-FI ACCESS POINT CREDENTIALS ---
-// Change AP_PASSWORD before deploying to avoid unauthorised telemetry access.
+// SECURITY: AP_PASSWORD MUST be changed before deploying to a vehicle.
+//   A guessable password allows unauthenticated access to live CAN telemetry.
+//   Minimum recommended: 12 characters, mixed case + digits + symbols.
 #define AP_SSID     "Audi_S3_Telemetry"
-#define AP_PASSWORD "ChangeMe_S3AP!"
+#define AP_PASSWORD "ChangeMe_S3AP!"   // <-- REPLACE BEFORE DEPLOYMENT
 
 // --- THREAD-SAFE FIXED CHAR BUFFER ARRAY ---
 static char global_ws_buffer[256]; // Allocates a fixed memory space block
@@ -74,9 +76,6 @@ lv_color_t color_alert_red;
 static uint32_t last_beep_time = 0;
 static bool alarm_sounding = false;
 
-// --- WI-FI ACCESS POINT CREDENTIALS ---
-const char* ap_ssid = AP_SSID;
-const char* ap_password = AP_PASSWORD;
 // Network Web Interface Handles
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
@@ -375,8 +374,8 @@ void setup() {
 
 
   // 2b. ACTIVATE ASYNCHRONOUS COCKPIT HOTSPOT AP NETWORK
-  WiFi.softAP(ap_ssid, ap_password);
-  Serial.print("Access Point Launched. Connect to: "); Serial.println(ap_ssid);
+  WiFi.softAP(AP_SSID, AP_PASSWORD);
+  Serial.print("Access Point Launched. Connect to: "); Serial.println(AP_SSID);
   Serial.print("Dashboard Web URL Address: http://");  Serial.println(WiFi.softAPIP());
 
   // Bind and Link Web Server Routes
@@ -1180,15 +1179,18 @@ void startTwaiChannel(int port_idx, int tx_pin, int rx_pin) {
       f_cfg = TWAI_FILTER_CONFIG_ACCEPT_ALL();
   } 
   else if (port_idx == 1) {
-      // Channel 1: Comfort Convenience Bus Filter (IDs 0x300-0x3FF)
-      f_cfg.acceptance_code = (0x300 << 21);
-      f_cfg.acceptance_mask = ~(0x300U << 21);
+      // Channel 1: Comfort Convenience Bus Filter – accept IDs 0x300–0x3FF.
+      // SJA1000 filter convention: mask bit=1 → don't care, mask bit=0 → must match code.
+      // acceptance_code top-3 bits = 0b011 (0x300..0x3FF range).
+      // ~(0x700U << 21) makes bits[31:29] compare and all other bits don't care.
+      f_cfg.acceptance_code = (0x300U << 21);
+      f_cfg.acceptance_mask = ~(0x700U << 21);
       f_cfg.single_filter = true;
   } 
   else if (port_idx == 2) {
-      // Channel 2: Infotainment / Multimedia Bus Filter (IDs 0x500-0x5FF)
-      f_cfg.acceptance_code = (0x500 << 21);
-      f_cfg.acceptance_mask = ~(0x500U << 21);
+      // Channel 2: Infotainment Bus Filter – accept IDs 0x500–0x5FF.
+      f_cfg.acceptance_code = (0x500U << 21);
+      f_cfg.acceptance_mask = ~(0x700U << 21);
       f_cfg.single_filter = true;
   } 
   else {
@@ -1231,18 +1233,28 @@ void processInboundFrames(int port_idx, const char* networkName) {
 #endif
 
         // C-1/H-3: Take the interpreter mutex before touching sys_ctx->interpreter
-        //          and active_vehicle_profile.  This prevents a use-after-free
-        //          when Core 0 deletes and replaces the interpreter via VIN decode.
-        //          C-4: Acquire the metrics spinlock around the actual interpret call
-        //          because interpreter methods write to sys_ctx->metrics, which
-        //          Core 0's runBenchTelemetrySimulation also writes.
+        //          and active_vehicle_profile to prevent use-after-free on Core 0
+        //          delete/replace during VIN decode.
+        //
+        // C-4: The metrics spinlock is acquired per-dispatch branch to keep the
+        //      critical section as short as possible.  The platform parse functions
+        //      write to sys_ctx->metrics inside this critical section — they do NOT
+        //      need their own spinlock calls because they already run here under it.
         if (g_interpreter_mutex != NULL) xSemaphoreTake(g_interpreter_mutex, portMAX_DELAY);
         if (sys_ctx->interpreter != nullptr && active_vehicle_profile.network_generation != SERIES_UNKNOWN) {
-            portENTER_CRITICAL(&g_metrics_mux);
-            if (port_idx == 0)      sys_ctx->interpreter->interpretDriveTrain(msg);
-            else if (port_idx == 1) sys_ctx->interpreter->interpretComfort(msg);
-            else if (port_idx == 2) sys_ctx->interpreter->interpretInfotainment(msg);
-            portEXIT_CRITICAL(&g_metrics_mux);
+            if (port_idx == 0) {
+                portENTER_CRITICAL(&g_metrics_mux);
+                sys_ctx->interpreter->interpretDriveTrain(msg);
+                portEXIT_CRITICAL(&g_metrics_mux);
+            } else if (port_idx == 1) {
+                portENTER_CRITICAL(&g_metrics_mux);
+                sys_ctx->interpreter->interpretComfort(msg);
+                portEXIT_CRITICAL(&g_metrics_mux);
+            } else if (port_idx == 2) {
+                portENTER_CRITICAL(&g_metrics_mux);
+                sys_ctx->interpreter->interpretInfotainment(msg);
+                portEXIT_CRITICAL(&g_metrics_mux);
+            }
         }
         if (g_interpreter_mutex != NULL) xSemaphoreGive(g_interpreter_mutex);
     }
