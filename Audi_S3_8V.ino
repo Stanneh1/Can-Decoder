@@ -5,6 +5,9 @@
 #include <ArduinoJson.h>
 #include <atomic>
 #include <string_view>
+#if __has_include(<soc/soc_caps.h>)
+#include <soc/soc_caps.h>
+#endif
 #include "VehicleInterpreters.h"
 #include "VehicleSimulator.h"
 
@@ -26,6 +29,8 @@
 
 // Uncomment to enable per-frame CAN hex logging (high UART bandwidth – bench use only)
 // #define DEBUG_CAN_FRAMES
+
+static constexpr uint32_t SERIAL_BAUD_RATE = 115200;
 
 // --- WI-FI ACCESS POINT CREDENTIALS ---
 // SECURITY: AP_PASSWORD MUST be changed before deploying to a vehicle.
@@ -84,6 +89,7 @@ static bool alarm_sounding = false;
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
 static uint32_t last_web_broadcast = 0;
+static bool g_web_dashboard_ready = false;
 
 // --- BENCH FULLTEST VIN SWEEP CONFIGURATION ---
 struct BenchVinSignature {
@@ -401,7 +407,7 @@ void CockpitCoreProcessor(void *pvParameters) {
 void setup() {
     // --- INJECT THIS LINE AT THE ABSOLUTE START OF SETUP() ---
 
-  Serial.begin(921600);
+  Serial.begin(SERIAL_BAUD_RATE);
 
     // Strict blocking loop: Forces the ESP32 to wait until the PC monitor opens!
     delay(500); 
@@ -414,6 +420,7 @@ void setup() {
   }
 
   Serial.println();
+  Serial.printf("[BOOT] Serial console online at %lu baud.\n", (unsigned long)SERIAL_BAUD_RATE);
 
   sys_ctx = new GlobalFrameworkContext();
 
@@ -464,17 +471,25 @@ void setup() {
 
 
   // 2b. ACTIVATE ASYNCHRONOUS COCKPIT HOTSPOT AP NETWORK
-  WiFi.softAP(AP_SSID, AP_PASSWORD);
-  Serial.print("Access Point Launched. Connect to: "); Serial.println(AP_SSID);
-  Serial.print("Dashboard Web URL Address: http://");  Serial.println(WiFi.softAPIP());
+#if defined(SOC_WIFI_SUPPORTED) && SOC_WIFI_SUPPORTED
+  if (WiFi.softAP(AP_SSID, AP_PASSWORD)) {
+    Serial.print("Access Point Launched. Connect to: "); Serial.println(AP_SSID);
+    Serial.print("Dashboard Web URL Address: http://");  Serial.println(WiFi.softAPIP());
 
-  // Bind and Link Web Server Routes
-  ws.onEvent(onWsEvent);
-  server.addHandler(&ws);
-  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
-    request->send_P(200, "text/html", index_html);
-  });
-  server.begin();
+    // Bind and Link Web Server Routes
+    ws.onEvent(onWsEvent);
+    server.addHandler(&ws);
+    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+      request->send_P(200, "text/html", index_html);
+    });
+    server.begin();
+    g_web_dashboard_ready = true;
+  } else {
+    Serial.println("[SYSTEM] WARNING: Wi-Fi hotspot failed to start.");
+  }
+#else
+  Serial.println("[SYSTEM] Wi-Fi hotspot disabled: this target does not provide on-chip Wi-Fi.");
+#endif
 
 
   // 3. GRAPHICS DISPLAY & TOUCH ENVIRONMENT ENVIRONMENT BINDING
@@ -526,7 +541,7 @@ void setup() {
 
 void loop() {
   static uint32_t last_cleanup = 0;
-  if (millis() - last_cleanup > 1000) {
+  if (g_web_dashboard_ready && millis() - last_cleanup > 1000) {
     last_cleanup = millis();
     ws.cleanupClients();
   }
@@ -571,7 +586,7 @@ void loop() {
 
   // C-2: Acquire load ensures we see all Core-1 writes to global_ws_buffer
   //      that happened before the release store of ws_payload_ready = true.
-  if (ws_payload_ready.load(std::memory_order_acquire)) {
+  if (g_web_dashboard_ready && ws_payload_ready.load(std::memory_order_acquire)) {
     if (ws.count() > 0 && ws.availableForWriteAll()) {
       ws.textAll(global_ws_buffer);
     }
