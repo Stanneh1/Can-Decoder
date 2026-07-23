@@ -3,8 +3,9 @@
 #include <ESPAsyncWebServer.h>
 #include <AsyncTCP.h>
 #include <ArduinoJson.h>
+#include <atomic>
 #include "VehicleInterpreters.h"
-#include "VehicleSimulator.h" 
+#include "VehicleSimulator.h"
 
 // --- HARDWARE CONFIGURATION MAPPINGS ---
 // 40-Pin Expansion Header Layout Assignments
@@ -21,12 +22,30 @@
 // --- SAFETY CRITICAL THRESHOLDS ---
 #define MAX_SAFE_OIL_TEMP 115     // Alarm activates over 115°C
 #define MAX_SAFE_COOLANT_TEMP 105 // Alarm activates over 105°C
-// --- WEB TRANSMISSION THREAD-SAFETY COUPLING ---
 
+// Uncomment to enable per-frame CAN hex logging (high UART bandwidth – bench use only)
+// #define DEBUG_CAN_FRAMES
+
+// --- WI-FI ACCESS POINT CREDENTIALS ---
+// Change AP_PASSWORD before deploying to avoid unauthorised telemetry access.
+#define AP_SSID     "Audi_S3_Telemetry"
+#define AP_PASSWORD "ChangeMe_S3AP!"
 
 // --- THREAD-SAFE FIXED CHAR BUFFER ARRAY ---
 static char global_ws_buffer[256]; // Allocates a fixed memory space block
-static volatile bool ws_payload_ready = false;
+// std::atomic<bool> with acquire/release semantics provides the memory-ordering
+// fence needed on RISC-V (ESP32-P4) so the buffer writes are visible to Core 0
+// before it observes the flag as true.  Plain 'volatile' does NOT provide this.
+static std::atomic<bool> ws_payload_ready{false};
+
+// --- MULTICORE SYNCHRONISATION PRIMITIVES ---
+// g_metrics_mux : protects sys_ctx->metrics fields (Core-0 bench-sim writes vs
+//                 Core-1 interpreter writes and UI reads).
+// g_interpreter_mutex : FreeRTOS mutex protecting sys_ctx->interpreter pointer
+//                       and active_vehicle_profile (rarely written from Core 0
+//                       via serial VIN injection).
+portMUX_TYPE      g_metrics_mux      = portMUX_INITIALIZER_UNLOCKED;
+SemaphoreHandle_t g_interpreter_mutex = NULL;
 
 // --- DYNAMIC GRAPHICAL UI OBJECT POINTERS ---
 // (Removed 'static' so our class files can access them without conflicts)
@@ -56,8 +75,8 @@ static uint32_t last_beep_time = 0;
 static bool alarm_sounding = false;
 
 // --- WI-FI ACCESS POINT CREDENTIALS ---
-const char* ap_ssid = "Audi_S3_Telemetry";
-const char* ap_password = "Password123";
+const char* ap_ssid = AP_SSID;
+const char* ap_password = AP_PASSWORD;
 // Network Web Interface Handles
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
@@ -206,6 +225,10 @@ void landscape_touch_read_cb(lv_indev_drv_t * indev_driver, lv_indev_data_t * da
 // Isolated High-Memory Task Pointer Handle
 TaskHandle_t CockpitTaskHandle = NULL;
 
+// CAN TX/RX pin table for bus-off recovery (mirrors the setup() calls)
+static const int kCanTxPins[] = {CH0_TX, CH1_TX, CH2_TX};
+static const int kCanRxPins[] = {CH0_RX, CH1_RX, CH2_RX};
+
 // Forward declaration of the custom thread runner
 void CockpitCoreProcessor(void *pvParameters) {
   Serial.println("[SYSTEM] High-Memory Telemetry Task Thread bound to Core 1 successfully.");
@@ -220,28 +243,64 @@ void CockpitCoreProcessor(void *pvParameters) {
     updateUIElements();
     runAcousticAlertEngine();
 
-    // Independent 100ms pacing timer for the web data flag
-        // ASYNCHRONOUS TELEMETRY WEB STREAM OVERLAY (100ms / 10Hz)
+    // H-2: Periodic CAN bus-off recovery (checked every 5 seconds).
+    // If any controller enters the bus-off state (TEC > 255) it stops
+    // RX/TX silently.  Detect and fully reinstall the driver to recover.
+    static uint32_t last_busoff_check = 0;
+    if (millis() - last_busoff_check > 5000) {
+      last_busoff_check = millis();
+      for (int ch = 0; ch < 3; ch++) {
+        twai_status_info_t info;
+        if (twai_get_status_info_v2(twai_ports[ch], &info) == ESP_OK) {
+          if (info.state == TWAI_STATE_BUS_OFF) {
+            Serial.printf("[RECOVERY] CAN Channel %d bus-off detected. Reinitialising...\n", ch);
+            twai_stop_v2(twai_ports[ch]);
+            twai_driver_uninstall_v2(twai_ports[ch]);
+            startTwaiChannel(ch, kCanTxPins[ch], kCanRxPins[ch]);
+          }
+        }
+      }
+    }
+
+    // ASYNCHRONOUS TELEMETRY WEB STREAM OVERLAY (100ms / 10Hz)
     static uint32_t last_timer_tick = 0;
     if (millis() - last_timer_tick > 100) { 
       last_timer_tick = millis();
       
-      // Only write to the buffer if Core 0 has dispatched the previous packet
-      if (!ws_payload_ready) { 
+      // Only write to the buffer if Core 0 has dispatched the previous packet.
+      // Use relaxed load here – we only need the acquire on the read side in loop().
+      if (!ws_payload_ready.load(std::memory_order_relaxed)) { 
         static JsonDocument doc; 
         doc.clear(); 
+
+        // C-4: Snapshot metrics under the spinlock to prevent torn reads from
+        //      Core 0's runBenchTelemetrySimulation writing concurrently.
+        LiveTelemetryMetrics m_snap;
+        portENTER_CRITICAL(&g_metrics_mux);
+        m_snap = sys_ctx->metrics;
+        portEXIT_CRITICAL(&g_metrics_mux);
+
+        // H-3: Read model_name pointer under the interpreter mutex so we never
+        //      observe a partially-written pointer during VIN decode on Core 0.
+        const char* car_name = "GENERIC";
+        if (g_interpreter_mutex != NULL) {
+          xSemaphoreTake(g_interpreter_mutex, portMAX_DELAY);
+          car_name = active_vehicle_profile.model_name;
+          xSemaphoreGive(g_interpreter_mutex);
+        }
+
+        doc["rpm"]   = m_snap.engine_rpm;
+        doc["boost"] = m_snap.boost_bar;
+        doc["peak"]  = m_snap.peak_boost_bar;
+        doc["oil"]   = m_snap.oil_temp;
+        doc["h2o"]   = m_snap.coolant_temp;
+        doc["car"]   = car_name;
         
-        doc["rpm"]   = sys_ctx->metrics.engine_rpm;
-        doc["boost"] = sys_ctx->metrics.boost_bar;
-        doc["peak"]  = sys_ctx->metrics.peak_boost_bar;
-        doc["oil"]   = sys_ctx->metrics.oil_temp;
-        doc["h2o"]   = sys_ctx->metrics.coolant_temp;
-        doc["car"] = active_vehicle_profile.model_name;
-        
-        // FIX: Serialize directly into the fixed character array without dynamic memory growth
         serializeJson(doc, global_ws_buffer, sizeof(global_ws_buffer));
         
-        ws_payload_ready = true; // Signal Core 0 that data is ready to send
+        // C-2: Release store ensures all preceding writes to global_ws_buffer
+        //      are visible to Core 0 before it observes ws_payload_ready = true.
+        ws_payload_ready.store(true, std::memory_order_release);
       }
     }
     
@@ -268,6 +327,10 @@ void setup() {
   Serial.println();
 
   sys_ctx = new GlobalFrameworkContext();
+
+  // Create the interpreter mutex before any task can access sys_ctx->interpreter
+  // or active_vehicle_profile.
+  g_interpreter_mutex = xSemaphoreCreateMutex();
 
    delay(200); 
 
@@ -389,10 +452,13 @@ void loop() {
         decodeAndPrintVehicleIdentity(testVin.c_str());
         
         // Dynamically recalculate and apply the visual display scales on your desk!
+        // Take interpreter mutex since configureUiLimits accesses sys_ctx->interpreter.
+        if (g_interpreter_mutex != NULL) xSemaphoreTake(g_interpreter_mutex, portMAX_DELAY);
         if (sys_ctx != nullptr && sys_ctx->interpreter != nullptr) {
             sys_ctx->interpreter->configureUiLimits();
             Serial.println("[DEBUG] UI morphing execution complete.");
         }
+        if (g_interpreter_mutex != NULL) xSemaphoreGive(g_interpreter_mutex);
     } else {
         Serial.println("[DEBUG] Invalid VIN footprint. Must be exactly 17 characters long.");
     }
@@ -416,12 +482,13 @@ void loop() {
       runBenchTelemetrySimulation(mock_rpm, 1.25, 95.0, 90.0);
   }
 
-  // If Core 1 has marked a web data packet as ready, dispatch it here
-  if (ws_payload_ready) {
+  // C-2: Acquire load ensures we see all Core-1 writes to global_ws_buffer
+  //      that happened before the release store of ws_payload_ready = true.
+  if (ws_payload_ready.load(std::memory_order_acquire)) {
     if (ws.count() > 0 && ws.availableForWriteAll()) {
       ws.textAll(global_ws_buffer);
     }
-    ws_payload_ready = false; 
+    ws_payload_ready.store(false, std::memory_order_relaxed);
   }
   delay(1);
 }
@@ -518,43 +585,50 @@ void buildCockpitUI() {
 // METRIC EXTRACTION REDRAW LOGIC CYCLE
 // -------------------------------------------------------------
 void updateUIElements() {
-  // FIXED: Expanded from a single bare 'char' to a robust 32-byte character array buffer
-  char buf[32]; 
-  
+  char buf[32];
+
+  // C-4: Snapshot the entire metrics struct under the spinlock so we never
+  //      observe a torn value from Core 0's runBenchTelemetrySimulation.
+  //      The peak update is also done under the lock for the same reason.
+  LiveTelemetryMetrics m;
+  portENTER_CRITICAL(&g_metrics_mux);
+  m = sys_ctx->metrics;
+  if (m.boost_bar > m.peak_boost_bar) {
+    sys_ctx->metrics.peak_boost_bar = m.boost_bar;
+    m.peak_boost_bar = m.boost_bar;
+  }
+  portEXIT_CRITICAL(&g_metrics_mux);
+
   // 1. Sync Live Engine RPM Dials
   if (sys_ctx->rpm_meter != nullptr) {
-    lv_arc_set_value(sys_ctx->rpm_meter, (int)sys_ctx->metrics.engine_rpm);
+    lv_arc_set_value(sys_ctx->rpm_meter, (int)m.engine_rpm);
   }
-  snprintf(buf, sizeof(buf), "%.0f RPM", sys_ctx->metrics.engine_rpm);
+  snprintf(buf, sizeof(buf), "%.0f RPM", m.engine_rpm);
   lv_label_set_text(lbl_rpm_val, buf);
 
-  // 2. Track Peak Boost Metrics Safely
-  if (sys_ctx->metrics.boost_bar > sys_ctx->metrics.peak_boost_bar) {
-    sys_ctx->metrics.peak_boost_bar = sys_ctx->metrics.boost_bar;
-  }
-  
+  // 2. Boost pressure bar and peak label
   if (sys_ctx->boost_meter != nullptr) {
-    lv_bar_set_value(sys_ctx->boost_meter, (int)(sys_ctx->metrics.boost_bar * 100), LV_ANIM_OFF);
+    lv_bar_set_value(sys_ctx->boost_meter, (int)(m.boost_bar * 100), LV_ANIM_OFF);
   }
-  snprintf(buf, sizeof(buf), "%.2f Bar\nPK: %.2f B", sys_ctx->metrics.boost_bar, sys_ctx->metrics.peak_boost_bar);
+  snprintf(buf, sizeof(buf), "%.2f Bar\nPK: %.2f B", m.boost_bar, m.peak_boost_bar);
   lv_label_set_text(lbl_boost_val, buf);
 
   // 3. Sync Dynamic Thermal Engine Arcs
   if (sys_ctx->oil_arc != nullptr) {
-    lv_arc_set_value(sys_ctx->oil_arc, (int)sys_ctx->metrics.oil_temp);
+    lv_arc_set_value(sys_ctx->oil_arc, (int)m.oil_temp);
   }
   if (sys_ctx->coolant_arc != nullptr) {
-    lv_arc_set_value(sys_ctx->coolant_arc, (int)sys_ctx->metrics.coolant_temp);
+    lv_arc_set_value(sys_ctx->coolant_arc, (int)m.coolant_temp);
   }
-  snprintf(buf, sizeof(buf), "OIL: %.0f C\nH2O: %.0f C", sys_ctx->metrics.oil_temp, sys_ctx->metrics.coolant_temp);
+  snprintf(buf, sizeof(buf), "OIL: %.0f C\nH2O: %.0f C", m.oil_temp, m.coolant_temp);
   lv_label_set_text(lbl_temps_val, buf);
 
   // 4. Update Peripheral Text Containers
   snprintf(buf, sizeof(buf), "DRV DOOR: %s  |  TGT: %.1f C", 
-           sys_ctx->metrics.driver_door_open ? "OPEN" : "CLOSED", sys_ctx->metrics.target_temp);
+           m.driver_door_open ? "OPEN" : "CLOSED", m.target_temp);
   lv_label_set_text(label_comfort, buf);
 
-  snprintf(buf, sizeof(buf), "MMI VOL WHEEL HEX INPUT VECTOR: 0x%02X", sys_ctx->metrics.mmi_key_code);
+  snprintf(buf, sizeof(buf), "MMI VOL WHEEL HEX INPUT VECTOR: 0x%02X", m.mmi_key_code);
   lv_label_set_text(label_infotainment, buf);
 }
 
@@ -566,22 +640,27 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventTyp
   if (type == WS_EVT_DATA) { 
     AwsFrameInfo *info = (AwsFrameInfo*)arg;
     if (info != NULL && info->final && info->index == 0 && info->len == len && info->opcode == WS_TEXT) {
-      data[len] = 0; 
-      
-      if (strcmp((char*)data, "RESET_PEAK") == 0) {
+      // C-3: Copy into a local buffer instead of writing data[len]=0, which
+      //      writes one byte past the end of the AsyncTCP receive buffer and
+      //      corrupts the heap.
+      char cmd[32];
+      size_t copy_len = (len < sizeof(cmd) - 1) ? len : (sizeof(cmd) - 1);
+      memcpy(cmd, data, copy_len);
+      cmd[copy_len] = '\0';
+
+      if (strcmp(cmd, "RESET_PEAK") == 0) {
+        // C-4: The peak field is also accessed from Core 1; protect with spinlock.
+        portENTER_CRITICAL(&g_metrics_mux);
         sys_ctx->metrics.peak_boost_bar = 0.0;
-        
-        // FIX: Removed client->id() to prevent string conversion pointer faults
+        portEXIT_CRITICAL(&g_metrics_mux);
         Serial.println("[WEB EVENT] Peak Turbo metrics zeroed out via remote command.");
       }
     }
   }
   else if (type == WS_EVT_CONNECT) {
-    // FIX: Using a clean, unparameterized text string for connection confirmations
     Serial.println("[WEB SERVER] Remote phone/tablet terminal device connected successfully.");
   }
   else if (type == WS_EVT_DISCONNECT) {
-    // FIX: Clean unparameterized text logging string for link drops
     Serial.println("[WEB SERVER] Remote phone/tablet terminal device disconnected.");
   }
 }
@@ -590,7 +669,11 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventTyp
 // EVENT CALLBACK REGISTER PATHS
 // -------------------------------------------------------------
 static void handleBoostResetTouch(lv_event_t * e) {
+  // C-4: Called on Core 1 from the LVGL event loop; use spinlock consistent
+  //      with all other peak_boost_bar writes.
+  portENTER_CRITICAL(&g_metrics_mux);
   sys_ctx->metrics.peak_boost_bar = 0.0;
+  portEXIT_CRITICAL(&g_metrics_mux);
   Serial.println("[UI EVENT] Historical Peak Boost memory register zeroed out.");
 }
 
@@ -989,8 +1072,16 @@ void decodeAndPrintVehicleIdentity(const char* vin) {
     // =========================================================================
     // 5. THE GLOBAL VAG SYSTEM DYNAMIC CLASS CONSTRUCTOR ROUTER MATRIX
     // =========================================================================
+    // C-1/H-3: Take the interpreter mutex for the entire delete/new block.
+    //          Core 1 holds this same mutex while calling interpreter methods,
+    //          so we cannot delete the object while it is in use.
+    //          Writes to active_vehicle_profile (brand, model_name, etc.) above
+    //          are also protected by taking the mutex here before this function
+    //          is called from loop() — the caller acquires it first (see loop()).
+    if (g_interpreter_mutex != NULL) xSemaphoreTake(g_interpreter_mutex, portMAX_DELAY);
+
     if (sys_ctx->interpreter != nullptr) {
-        delete sys_ctx->interpreter; // Garbage collect current workspace instance safely
+        delete sys_ctx->interpreter;
         sys_ctx->interpreter = nullptr;
     }
 
@@ -1065,6 +1156,8 @@ void decodeAndPrintVehicleIdentity(const char* vin) {
         sys_ctx->interpreter = new GenericVehicleInterpreter();
         Serial.println("[DECOUPLER] Dynamic Instance Allocation: Reverted to Generic Baseline Interface.");
     }
+
+    if (g_interpreter_mutex != NULL) xSemaphoreGive(g_interpreter_mutex);
 }
 
 
@@ -1079,34 +1172,36 @@ void startTwaiChannel(int port_idx, int tx_pin, int rx_pin) {
 
   // --- DYNAMIC HARDWARE ACCEPTANCE FILTERING ---
   if (port_idx == 0) {
-      // Channel 0: Drive Train Bus Filter
-      // We set a loose mask to allow standard engine IDs (0x000-0x3FF) AND UDS Diagnostic IDs (0x7E8-0x7EF)
-      f_cfg.acceptance_code = (0x000 << 21);
-      f_cfg.acceptance_mask = ~((0x7F0) << 21); // Mask matches the high bits to let diagnostic/powertrain pass
-      f_cfg.single_filter = true;
+      // M-3: Channel 0 carries both powertrain frames and UDS diagnostic
+      //      responses (0x7E8-0x7EF).  The two ID ranges are too far apart
+      //      to express with a single SJA1000-compatible filter mask without
+      //      admitting unrelated IDs.  Accept-all on this channel and rely on
+      //      the software switch-case in the parsers to ignore irrelevant IDs.
+      f_cfg = TWAI_FILTER_CONFIG_ACCEPT_ALL();
   } 
   else if (port_idx == 1) {
-      // Channel 1: Comfort Convenience Bus Filter
-      // Captures 0x300 through 0x6FF ranges safely, blocking thousands of high-frequency lighting/radar frames
+      // Channel 1: Comfort Convenience Bus Filter (IDs 0x300-0x3FF)
       f_cfg.acceptance_code = (0x300 << 21);
-      f_cfg.acceptance_mask = ~((0x700) << 21);
+      f_cfg.acceptance_mask = ~(0x300U << 21);
       f_cfg.single_filter = true;
   } 
   else if (port_idx == 2) {
-      // Channel 2: Infotainment / Multimedia Bus Filter
-      // Filters strictly for button matrices, screen updates, and wheel scrolling streams
+      // Channel 2: Infotainment / Multimedia Bus Filter (IDs 0x500-0x5FF)
       f_cfg.acceptance_code = (0x500 << 21);
-      f_cfg.acceptance_mask = ~((0x700) << 21);
+      f_cfg.acceptance_mask = ~(0x500U << 21);
       f_cfg.single_filter = true;
   } 
   else {
-      // Fallback fallback safety configuration
       f_cfg = TWAI_FILTER_CONFIG_ACCEPT_ALL();
   }
   
-  // Install the reconfigured filter registers and fire up the driver chip
-  twai_driver_install_v2(&g_cfg, &t_cfg, &f_cfg, &twai_ports[port_idx]);
-  
+  // L-4: Check the driver install return value; a silently ignored failure
+  //      leaves twai_ports[port_idx] uninitialised, causing a crash on start.
+  if (twai_driver_install_v2(&g_cfg, &t_cfg, &f_cfg, &twai_ports[port_idx]) != ESP_OK) {
+      Serial.printf("[CRITICAL] Failed to install CAN Channel %d driver. Halting channel.\n", port_idx);
+      return;
+  }
+
   if (twai_start_v2(twai_ports[port_idx]) == ESP_OK) {
       Serial.printf("[SYSTEM] CAN Channel %d (TX:%d, RX:%d) safely isolated and started.\n", port_idx, tx_pin, rx_pin);
   } else {
@@ -1114,30 +1209,42 @@ void startTwaiChannel(int port_idx, int tx_pin, int rx_pin) {
   }
 }
 
- // -------------------------------------------------------------// RAW NETWORK STREAM RECEPTION & VAG-SCALING TRANSLATION// -------------------------------------------------------------
+
+ // -------------------------------------------------------------
+// RAW NETWORK STREAM RECEPTION & VAG-SCALING TRANSLATION
+// -------------------------------------------------------------
 void processInboundFrames(int port_idx, const char* networkName) {
     twai_message_t msg;
     if (twai_receive_v2(twai_ports[port_idx], &msg, 0) == ESP_OK) {
-        
-        // 1. Core Network Console Logging Outlay
+
+        // M-4: Per-frame hex logging is high-bandwidth and causes UART contention
+        //      between cores.  Enable only during bench-level debugging.
+#ifdef DEBUG_CAN_FRAMES
         Serial.print("["); Serial.print(networkName); Serial.print("] ID: 0x");
         Serial.print(msg.identifier, HEX); Serial.print(" | HEX DATA PAYLOAD: ");
-
         for(int i = 0; i < msg.data_length_code; i++) {
-            if(msg.data[i] < 0x10) {
-                Serial.print("0");
-            }
+            if(msg.data[i] < 0x10) Serial.print("0");
             Serial.print(msg.data[i], HEX);
             Serial.print(" ");
         }
-        Serial.println(); // Terminate the hex monitor line cleanly
+        Serial.println();
+#endif
 
-        // 2. Redirect Traffic Vectors directly through the sys_ctx tracking handle
-            if (sys_ctx->interpreter != nullptr && active_vehicle_profile.network_generation != SERIES_UNKNOWN) {
+        // C-1/H-3: Take the interpreter mutex before touching sys_ctx->interpreter
+        //          and active_vehicle_profile.  This prevents a use-after-free
+        //          when Core 0 deletes and replaces the interpreter via VIN decode.
+        //          C-4: Acquire the metrics spinlock around the actual interpret call
+        //          because interpreter methods write to sys_ctx->metrics, which
+        //          Core 0's runBenchTelemetrySimulation also writes.
+        if (g_interpreter_mutex != NULL) xSemaphoreTake(g_interpreter_mutex, portMAX_DELAY);
+        if (sys_ctx->interpreter != nullptr && active_vehicle_profile.network_generation != SERIES_UNKNOWN) {
+            portENTER_CRITICAL(&g_metrics_mux);
             if (port_idx == 0)      sys_ctx->interpreter->interpretDriveTrain(msg);
             else if (port_idx == 1) sys_ctx->interpreter->interpretComfort(msg);
             else if (port_idx == 2) sys_ctx->interpreter->interpretInfotainment(msg);
+            portEXIT_CRITICAL(&g_metrics_mux);
         }
+        if (g_interpreter_mutex != NULL) xSemaphoreGive(g_interpreter_mutex);
     }
 }
 

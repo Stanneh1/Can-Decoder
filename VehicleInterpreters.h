@@ -4,6 +4,7 @@
 #include <Arduino.h>
 #include "driver/twai.h"
 #include <lvgl.h>
+#include "freertos/portmacro.h"
 
 // --- ADVANCED VEHICLE DECODING ENUMS ---
 enum MqbPlatformSeries {
@@ -70,6 +71,12 @@ extern twai_handle_t twai_ports[];
 extern lv_obj_t *rpm_meter;
 extern lv_obj_t *boost_meter;
 extern lv_color_t color_normal_green;
+
+// --- MULTICORE SYNCHRONISATION PRIMITIVES ---
+// g_metrics_mux: spinlock protecting sys_ctx->metrics fields against Core-0/Core-1 races.
+// g_interpreter_mutex: FreeRTOS mutex protecting sys_ctx->interpreter and active_vehicle_profile.
+extern portMUX_TYPE      g_metrics_mux;
+extern SemaphoreHandle_t g_interpreter_mutex;
 
 // =========================================================================
 //  BENCH COMPACT GENERIC FALLBACK INTERPRETER BLUEPRINT
