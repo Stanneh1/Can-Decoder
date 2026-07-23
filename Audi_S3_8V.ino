@@ -4,6 +4,7 @@
 #include <AsyncTCP.h>
 #include <ArduinoJson.h>
 #include <atomic>
+#include <string_view>
 #include "VehicleInterpreters.h"
 #include "VehicleSimulator.h"
 
@@ -32,6 +33,9 @@
 //   Minimum recommended: 12 characters, mixed case + digits + symbols.
 #define AP_SSID     "Audi_S3_Telemetry"
 #define AP_PASSWORD "ChangeMe_S3AP!"   // <-- REPLACE BEFORE DEPLOYMENT
+// Compile-time guard: prevent building with the unchanged default password.
+static_assert(std::string_view(AP_PASSWORD) != "ChangeMe_S3AP!",
+              "AP_PASSWORD must be changed from the default before deployment!");
 
 // --- THREAD-SAFE FIXED CHAR BUFFER ARRAY ---
 static char global_ws_buffer[256]; // Allocates a fixed memory space block
@@ -1182,15 +1186,15 @@ void startTwaiChannel(int port_idx, int tx_pin, int rx_pin) {
       // Channel 1: Comfort Convenience Bus Filter – accept IDs 0x300–0x3FF.
       // SJA1000 filter convention: mask bit=1 → don't care, mask bit=0 → must match code.
       // acceptance_code top-3 bits = 0b011 (0x300..0x3FF range).
-      // ~(0x700U << 21) makes bits[31:29] compare and all other bits don't care.
-      f_cfg.acceptance_code = (0x300U << 21);
-      f_cfg.acceptance_mask = ~(0x700U << 21);
+      // ~(0x700U << CAN_FILTER_ID_SHIFT) makes bits[31:29] compare and all others don't care.
+      f_cfg.acceptance_code = (0x300U << CAN_FILTER_ID_SHIFT);
+      f_cfg.acceptance_mask = ~(0x700U << CAN_FILTER_ID_SHIFT);
       f_cfg.single_filter = true;
   } 
   else if (port_idx == 2) {
       // Channel 2: Infotainment Bus Filter – accept IDs 0x500–0x5FF.
-      f_cfg.acceptance_code = (0x500U << 21);
-      f_cfg.acceptance_mask = ~(0x700U << 21);
+      f_cfg.acceptance_code = (0x500U << CAN_FILTER_ID_SHIFT);
+      f_cfg.acceptance_mask = ~(0x700U << CAN_FILTER_ID_SHIFT);
       f_cfg.single_filter = true;
   } 
   else {

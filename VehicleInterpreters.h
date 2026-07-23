@@ -6,6 +6,18 @@
 #include <lvgl.h>
 #include "freertos/portmacro.h"
 
+// --- CAN FILTER HELPER ---
+// SJA1000/ESP32 TWAI: standard 11-bit IDs are stored in bits [31:21] of the
+// 32-bit acceptance_code/acceptance_mask register.
+static constexpr int CAN_FILTER_ID_SHIFT = 21;
+
+// Decode raw VW/Audi temperature byte (value = Celsius + 40 offset, uint8_t).
+// Promotes to int before subtracting to avoid uint8_t underflow at cold start
+// (raw < 40 would wrap to 216+ as unsigned).
+static inline float decode_temperature_offset(uint8_t raw) {
+    return (float)((int)raw - 40);
+}
+
 // --- ADVANCED VEHICLE DECODING ENUMS ---
 enum MqbPlatformSeries {
     SERIES_UNKNOWN,

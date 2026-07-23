@@ -19,8 +19,8 @@ static void parseStandardMlbFrame(twai_message_t &msg) {
         case 0x1A4: { // MLB Drivetrain Thermal Indicators
             if (msg.data_length_code < 2) break;
             // M-1: int cast prevents uint8_t underflow on cold-start raw values < 40.
-            sys_ctx->metrics.oil_temp     = (float)((int)msg.data[0] - 40);
-            sys_ctx->metrics.coolant_temp = (float)((int)msg.data[1] - 40);
+            sys_ctx->metrics.oil_temp     = decode_temperature_offset(msg.data[0]);
+            sys_ctx->metrics.coolant_temp = decode_temperature_offset(msg.data[1]);
             break;
         }
         case 0x2A2: { // MLB Turbocharger Absolute Manifold Pressure

@@ -22,8 +22,8 @@ static void parseStandardMqbFrame(twai_message_t &msg) {
             // M-1: Cast to int before subtracting 40 to prevent uint8_t underflow.
             //      A raw byte of 0 (representing -40°C) would wrap to 216 without this cast,
             //      falsely triggering the thermal alarm on cold start.
-            sys_ctx->metrics.oil_temp     = (float)((int)msg.data[0] - 40);
-            sys_ctx->metrics.coolant_temp = (float)((int)msg.data[1] - 40);
+            sys_ctx->metrics.oil_temp     = decode_temperature_offset(msg.data[0]);
+            sys_ctx->metrics.coolant_temp = decode_temperature_offset(msg.data[1]);
             break;
         }
         case 0x28A: { // MQB Turbocharger Absolute Manifold Pressure
