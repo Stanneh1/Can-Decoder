@@ -121,7 +121,7 @@ static constexpr char kVinYearTokens[] = "123456789ABCDEFGHJKLMNPRSTVWXY";
 static constexpr uint32_t FULLTEST_STEP_INTERVAL_MS = 3000;
 static constexpr int FULLTEST_BASE_YEAR = 2001;
 // Temporary fixed year cap requested for bench test runs (RTC integration later).
-static constexpr int FULLTEST_CURRENT_YEAR = 2016;
+static constexpr int FULLTEST_CURRENT_YEAR = 2026;
 
 static const BenchVinSignature kBenchVinSignatures[] = {
     // Audi
@@ -173,7 +173,7 @@ bool isBenchYearValidForChassis(const char* chassis, int year) {
 
     // A3/S3 generation sanity mapping so fulltest doesn't generate impossible
     // combinations like "8P + 2023" or "8Y + 2008".
-    if (strcmp(chassis, "8P") == 0) return (year >= 2003 && year <= 2013);
+    if (strcmp(chassis, "8P") == 0) return (year >= 2003 && year <= 2012);
     if (strcmp(chassis, "8V") == 0) return (year >= 2013 && year <= 2020);
     if (strcmp(chassis, "GY") == 0 || strcmp(chassis, "8Y") == 0) return (year >= 2020);
 
