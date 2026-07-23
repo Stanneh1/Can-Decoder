@@ -8,6 +8,7 @@
 #if __has_include(<soc/soc_caps.h>)
 #include <soc/soc_caps.h>
 #endif
+#include <esp_heap_caps.h>  // PSRAM-aware heap allocation (heap_caps_malloc)
 
 // --- WI-FI HOTSPOT CAPABILITY SELECTION ---
 // On boards where SOC_WIFI_SUPPORTED is 0 but an on-board Wi-Fi module is
@@ -50,7 +51,7 @@
 // Uncomment to enable per-frame CAN hex logging (high UART bandwidth – bench use only)
 // #define DEBUG_CAN_FRAMES
 
-static constexpr uint32_t SERIAL_BAUD_RATE = 115200;
+static constexpr uint32_t SERIAL_BAUD_RATE = 921600; // USB CDC virtual port; 921600 is the conventional high-throughput setting
 
 // --- WI-FI ACCESS POINT CREDENTIALS ---
 // SECURITY: AP_PASSWORD MUST be changed before deploying to a vehicle.
@@ -284,6 +285,11 @@ void printSystemStatus() {
 #endif
 
     Serial.println("=============================");
+    Serial.printf("[HEAP]  Internal free: %u bytes | PSRAM free: %u / %u bytes\n",
+                  (unsigned)ESP.getFreeHeap(),
+                  (unsigned)ESP.getFreePsram(),
+                  (unsigned)ESP.getPsramSize());
+    Serial.println("=============================");
     Serial.println();
 }
 
@@ -450,7 +456,12 @@ static void handleBoostResetTouch(lv_event_t * e);
 #define DISP_VER_RES 720  // Becomes your vertical height when turned sideways
 
 static lv_disp_draw_buf_t draw_buf;
-static lv_color_t buf1[DISP_HOR_RES * 10]; 
+// Full-frame draw buffers – allocated from OPI PSRAM in setup().
+// The ESP32-P4NRW32 has 32 MB of stacked OPI PSRAM (~200 MB/s bandwidth), so
+// two full 1280×720 RGB565 frames (~1.75 MB each, ~3.5 MB total) fit easily and
+// eliminate the partial-frame tearing that a small 10-line scratch buffer causes.
+static lv_color_t *buf1 = nullptr;
+static lv_color_t *buf2 = nullptr;
 static lv_disp_drv_t disp_drv;
 
 // Mandatory LVGL display driver callback function
@@ -588,6 +599,10 @@ void setup() {
 
   Serial.println();
   Serial.printf("[BOOT] Serial console online at %lu baud.\n", (unsigned long)SERIAL_BAUD_RATE);
+  Serial.printf("[BOOT] Free heap: %u bytes | PSRAM total: %u bytes | PSRAM free: %u bytes\n",
+                (unsigned)ESP.getFreeHeap(),
+                (unsigned)ESP.getPsramSize(),
+                (unsigned)ESP.getFreePsram());
 
   sys_ctx = new GlobalFrameworkContext();
 
@@ -660,10 +675,22 @@ void setup() {
 
 
   // 3. GRAPHICS DISPLAY & TOUCH ENVIRONMENT ENVIRONMENT BINDING
+  // Allocate full-frame double buffers from OPI PSRAM before lv_init().
+  // Two full 1280×720 RGB565 frames consume ~3.5 MB of the 32 MB OPI PSRAM.
+  buf1 = (lv_color_t*)heap_caps_malloc(DISP_HOR_RES * DISP_VER_RES * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
+  buf2 = (lv_color_t*)heap_caps_malloc(DISP_HOR_RES * DISP_VER_RES * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
+  if (buf1 == nullptr || buf2 == nullptr) {
+      Serial.println("[CRITICAL] OPI PSRAM display buffer allocation failed! Enable PSRAM (OPI PSRAM) in Arduino board settings.");
+      while (1) delay(1000);
+  }
+  Serial.printf("[SYSTEM] LVGL double-frame buffers allocated in OPI PSRAM (%u KB each, %u KB total).\n",
+                (unsigned)(DISP_HOR_RES * DISP_VER_RES * sizeof(lv_color_t) / 1024),
+                (unsigned)(2 * DISP_HOR_RES * DISP_VER_RES * sizeof(lv_color_t) / 1024));
+
   lv_init();
 
-  // Initialize the drawing buffer structure safely
-  lv_disp_draw_buf_init(&draw_buf, buf1, NULL, DISP_HOR_RES * 10);
+  // Initialize the drawing buffer with full-frame double buffering
+  lv_disp_draw_buf_init(&draw_buf, buf1, buf2, DISP_HOR_RES * DISP_VER_RES);
 
   // Initialize the display driver structural tracker
   lv_disp_drv_init(&disp_drv);
@@ -698,7 +725,7 @@ void setup() {
     "CockpitTask",            // Descriptive tag
     32768,                    // Allocates massive 32KB stack layout
     NULL,                     // Task parameters input
-    0,                        // ◄ CHANGE THIS FROM 1 TO 0 (Idle/Low Priority)
+    1,                        // ◄ Priority 1: raised from idle (0) so the cockpit task is not starved by any brief Core 1 work
     &CockpitTaskHandle,       // Thread handle tracking variable
     1                         // Pin to Core 1
   );
@@ -1442,7 +1469,10 @@ void startTwaiChannel(int port_idx, int tx_pin, int rx_pin) {
   twai_general_config_t g_cfg = TWAI_GENERAL_CONFIG_DEFAULT((gpio_num_t)tx_pin, (gpio_num_t)rx_pin, TWAI_MODE_NORMAL);
   
   // Explicitly map target layout channel assignment to hardware registers
-  g_cfg.controller_id = port_idx; 
+  g_cfg.controller_id = port_idx;
+  // Increase the RX queue from the default 5 frames to 64 to absorb burst
+  // traffic on a live 500 Kbit/s vehicle CAN bus without losing frames.
+  g_cfg.rx_queue_len  = 64;
   
   twai_timing_config_t t_cfg = TWAI_TIMING_CONFIG_500KBITS();
   twai_filter_config_t f_cfg;
@@ -1455,13 +1485,8 @@ void startTwaiChannel(int port_idx, int tx_pin, int rx_pin) {
       //      inadvertently admitting unrelated IDs.  Accept-all is used and
       //      irrelevant IDs are dropped in software by the parser switch-cases.
       //
-      //      Performance note: on a live powertrain bus this can deliver many
-      //      hundreds of frames/s to the RX queue.  To protect against overrun,
-      //      the TWAI RX queue depth should be set to at least 32 entries in the
-      //      t_cfg initialisation above, and the Core-1 processInboundFrames
-      //      loop must drain the queue faster than it fills.  If the hardware
-      //      ever supports dual-filter mode for non-contiguous ranges, that would
-      //      be a cleaner alternative.
+      //      The RX queue is now set to 64 entries (above) to absorb burst
+      //      traffic without overrun.
       f_cfg = TWAI_FILTER_CONFIG_ACCEPT_ALL();
   } 
   else if (port_idx == 1) {
