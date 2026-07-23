@@ -8,6 +8,26 @@
 #if __has_include(<soc/soc_caps.h>)
 #include <soc/soc_caps.h>
 #endif
+
+// --- WI-FI HOTSPOT CAPABILITY SELECTION ---
+// On boards where SOC_WIFI_SUPPORTED is 0 but an on-board Wi-Fi module is
+// present (e.g. Waveshare ESP32-P4-NANO with companion ESP32-C6), uncomment
+// the line below to force-enable the hotspot regardless of the SOC flag.
+// Set to 0 to force-disable Wi-Fi at compile time.
+// #define WIFI_HOTSPOT_ENABLED 1
+
+#if defined(WIFI_HOTSPOT_ENABLED)
+  // Explicit user override takes priority over SOC detection.
+  #define _WIFI_ACTIVE WIFI_HOTSPOT_ENABLED
+#elif defined(SOC_WIFI_SUPPORTED)
+  // Trust the SOC capability flag when the header is present.
+  #define _WIFI_ACTIVE SOC_WIFI_SUPPORTED
+#else
+  // soc_caps.h was not found; WiFi.h is already included so assume Wi-Fi
+  // is available on this toolchain target.
+  #define _WIFI_ACTIVE 1
+#endif
+
 #include "VehicleInterpreters.h"
 #include "VehicleSimulator.h"
 
@@ -471,7 +491,7 @@ void setup() {
 
 
   // 2b. ACTIVATE ASYNCHRONOUS COCKPIT HOTSPOT AP NETWORK
-#if defined(SOC_WIFI_SUPPORTED) && SOC_WIFI_SUPPORTED
+#if _WIFI_ACTIVE
   if (WiFi.softAP(AP_SSID, AP_PASSWORD)) {
     Serial.print("Access Point Launched. Connect to: "); Serial.println(AP_SSID);
     Serial.print("Dashboard Web URL Address: http://");  Serial.println(WiFi.softAPIP());
@@ -488,7 +508,7 @@ void setup() {
     Serial.println("[SYSTEM] WARNING: Wi-Fi hotspot failed to start.");
   }
 #else
-  Serial.println("[SYSTEM] Wi-Fi hotspot disabled: this target does not provide on-chip Wi-Fi.");
+  Serial.println("[SYSTEM] Wi-Fi hotspot disabled: WIFI_HOTSPOT_ENABLED=0 set at compile time.");
 #endif
 
 
