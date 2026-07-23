@@ -4,19 +4,30 @@
 //  UNIFIED MQB DECODING CORE (USED BY ALL MQB ENGINE CLASSES)
 // =========================================================================
 static void parseStandardMqbFrame(twai_message_t &msg) {
+    // M-6: Guard against an uninitialised context during early startup.
+    if (sys_ctx == nullptr) return;
+
     switch(msg.identifier) {
         case 0x0FC: { // MQB Engine Speed (RPM)
+            // H-1: Validate DLC before accessing data bytes to prevent out-of-bounds reads
+            //      caused by malformed or remote frames (RTR) with DLC < 2.
+            if (msg.data_length_code < 2) break;
             uint16_t low_byte  = (uint16_t)(*(msg.data + 0));
             uint16_t high_byte = (uint16_t)(*(msg.data + 1));
             sys_ctx->metrics.engine_rpm = ((high_byte << 8) | low_byte) * 0.25; 
             break;
         }
         case 0x1A2: { // MQB Drivetrain Thermal Indicators
-            sys_ctx->metrics.oil_temp     = (float)(*(msg.data + 0) - 40); 
-            sys_ctx->metrics.coolant_temp = (float)(*(msg.data + 1) - 40); 
+            if (msg.data_length_code < 2) break;
+            // M-1: Cast to int before subtracting 40 to prevent uint8_t underflow.
+            //      A raw byte of 0 (representing -40°C) would wrap to 216 without this cast,
+            //      falsely triggering the thermal alarm on cold start.
+            sys_ctx->metrics.oil_temp     = (float)((int)msg.data[0] - 40);
+            sys_ctx->metrics.coolant_temp = (float)((int)msg.data[1] - 40);
             break;
         }
         case 0x28A: { // MQB Turbocharger Absolute Manifold Pressure
+            if (msg.data_length_code < 2) break;
             uint16_t low_b   = (uint16_t)(*(msg.data + 0));
             uint16_t high_b  = (uint16_t)(*(msg.data + 1));
             int raw_mbar     = ((high_b << 8) | low_b) * 10;
@@ -28,10 +39,13 @@ static void parseStandardMqbFrame(twai_message_t &msg) {
 }
 
 static void parseStandardMqbComfort(twai_message_t &msg) {
+    if (sys_ctx == nullptr) return;
     if (msg.identifier == 0x61C) {
+        if (msg.data_length_code < 1) return;
         sys_ctx->metrics.driver_door_open = (*(msg.data + 0) & 0x01);
     }
     else if (msg.identifier == 0x527) {
+        if (msg.data_length_code < 1) return;
         sys_ctx->metrics.target_temp = *(msg.data + 0) * 0.5;
     }
 }
@@ -43,7 +57,10 @@ static void parseStandardMqbComfort(twai_message_t &msg) {
 // --- 1. AUDI S3 8V ---
 void AudiS38VInterpreter::interpretDriveTrain(twai_message_t &msg) { parseStandardMqbFrame(msg); }
 void AudiS38VInterpreter::interpretComfort(twai_message_t &msg)    { parseStandardMqbComfort(msg); }
-void AudiS38VInterpreter::interpretInfotainment(twai_message_t &msg) { if (msg.identifier == 0x695) sys_ctx->metrics.mmi_key_code = *(msg.data + 0); }
+void AudiS38VInterpreter::interpretInfotainment(twai_message_t &msg) {
+    if (msg.identifier == 0x695 && msg.data_length_code >= 1)
+        sys_ctx->metrics.mmi_key_code = *(msg.data + 0);
+}
 void AudiS38VInterpreter::configureUiLimits() {
     sys_ctx->normal_green = lv_color_make(180, 0, 0); // Audi Performance Red
     if (sys_ctx->rpm_meter != nullptr) lv_arc_set_range(sys_ctx->rpm_meter, 0, 8000);
@@ -53,7 +70,10 @@ void AudiS38VInterpreter::configureUiLimits() {
 // --- 2. AUDI RS3 GY (MQB EVO) ---
 void AudiRS3GYInterpreter::interpretDriveTrain(twai_message_t &msg) { parseStandardMqbFrame(msg); }
 void AudiRS3GYInterpreter::interpretComfort(twai_message_t &msg)    { parseStandardMqbComfort(msg); }
-void AudiRS3GYInterpreter::interpretInfotainment(twai_message_t &msg) { if (msg.identifier == 0x695) sys_ctx->metrics.mmi_key_code = *(msg.data + 0); }
+void AudiRS3GYInterpreter::interpretInfotainment(twai_message_t &msg) {
+    if (msg.identifier == 0x695 && msg.data_length_code >= 1)
+        sys_ctx->metrics.mmi_key_code = *(msg.data + 0);
+}
 void AudiRS3GYInterpreter::configureUiLimits() {
     sys_ctx->normal_green = lv_color_make(200, 0, 0); // RS Crimson Red
     if (sys_ctx->rpm_meter != nullptr) lv_arc_set_range(sys_ctx->rpm_meter, 0, 8500); // Higher 5-Cylinder Redline

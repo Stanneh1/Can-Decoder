@@ -4,19 +4,27 @@
 //  UNIFIED MLB DECODING CORE (USED BY ALL LONGITUDINAL CARS)
 // =========================================================================
 static void parseStandardMlbFrame(twai_message_t &msg) {
+    // M-6: Guard against an uninitialised context during early startup.
+    if (sys_ctx == nullptr) return;
+
     switch(msg.identifier) {
         case 0x105: { // MLB Engine Speed (RPM variant slot)
+            // H-1: DLC guard prevents out-of-bounds read on malformed/RTR frames.
+            if (msg.data_length_code < 2) break;
             uint16_t low_byte  = (uint16_t)(*(msg.data + 0));
             uint16_t high_byte = (uint16_t)(*(msg.data + 1));
             sys_ctx->metrics.engine_rpm = ((high_byte << 8) | low_byte) * 0.25; 
             break;
         }
         case 0x1A4: { // MLB Drivetrain Thermal Indicators
-            sys_ctx->metrics.oil_temp     = (float)(*(msg.data + 0) - 40); 
-            sys_ctx->metrics.coolant_temp = (float)(*(msg.data + 1) - 40); 
+            if (msg.data_length_code < 2) break;
+            // M-1: int cast prevents uint8_t underflow on cold-start raw values < 40.
+            sys_ctx->metrics.oil_temp     = (float)((int)msg.data[0] - 40);
+            sys_ctx->metrics.coolant_temp = (float)((int)msg.data[1] - 40);
             break;
         }
         case 0x2A2: { // MLB Turbocharger Absolute Manifold Pressure
+            if (msg.data_length_code < 2) break;
             uint16_t low_b   = (uint16_t)(*(msg.data + 0));
             uint16_t high_b  = (uint16_t)(*(msg.data + 1));
             int raw_mbar     = ((high_b << 8) | low_b) * 10;
@@ -28,7 +36,9 @@ static void parseStandardMlbFrame(twai_message_t &msg) {
 }
 
 static void parseStandardMlbComfort(twai_message_t &msg) {
+    if (sys_ctx == nullptr) return;
     if (msg.identifier == 0x3C3) {
+        if (msg.data_length_code < 1) return;
         sys_ctx->metrics.driver_door_open = (*(msg.data + 0) & 0x01);
     }
 }

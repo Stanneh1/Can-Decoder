@@ -4,20 +4,28 @@
 //  UNIFIED PQ DECODING CORE (USED BY ALL LEGACY TP2.0 ENGINE CLASSES)
 // =========================================================================
 static void parseStandardPqFrame(twai_message_t &msg) {
+    // M-6: Guard against an uninitialised context during early startup.
+    if (sys_ctx == nullptr) return;
+
     switch(msg.identifier) {
         case 0x280: { // PQ Engine Speed (RPM)
+            // H-1: DLC guard prevents out-of-bounds read on malformed/RTR frames.
+            if (msg.data_length_code < 2) break;
             uint16_t low_byte  = (uint16_t)(*(msg.data + 0));
             uint16_t high_byte = (uint16_t)(*(msg.data + 1));
             sys_ctx->metrics.engine_rpm = ((high_byte << 8) | low_byte) * 0.25;
             break;
         }
         case 0x288: { // PQ Drivetrain Thermal Indicators
-            sys_ctx->metrics.coolant_temp = (float)(*(msg.data + 0) - 40);
-            sys_ctx->metrics.oil_temp     = (float)(*(msg.data + 1) - 40); 
+            if (msg.data_length_code < 2) break;
+            // M-1: int cast prevents uint8_t underflow on cold-start raw values < 40.
+            sys_ctx->metrics.coolant_temp = (float)((int)msg.data[0] - 40);
+            sys_ctx->metrics.oil_temp     = (float)((int)msg.data[1] - 40);
             break;
         }
         case 0x380: { // PQ Absolute Manifold Pressure (Boost)
-            int absolute_mbar = *(msg.data + 0) * 10; 
+            if (msg.data_length_code < 1) break;
+            int absolute_mbar = (int)msg.data[0] * 10;
             sys_ctx->metrics.boost_bar = (absolute_mbar - 1013) / 1000.0;
             if (sys_ctx->metrics.boost_bar < 0) sys_ctx->metrics.boost_bar = 0;
             break;
@@ -26,7 +34,9 @@ static void parseStandardPqFrame(twai_message_t &msg) {
 }
 
 static void parseStandardPqComfort(twai_message_t &msg) {
+    if (sys_ctx == nullptr) return;
     if (msg.identifier == 0x351) { 
+        if (msg.data_length_code < 1) return;
         sys_ctx->metrics.driver_door_open = (*(msg.data + 0) & 0x01);
     }
 }
@@ -38,7 +48,10 @@ static void parseStandardPqComfort(twai_message_t &msg) {
 // --- 1. AUDI S3 8P ---
 void AudiS38PInterpreter::interpretDriveTrain(twai_message_t &msg) { parseStandardPqFrame(msg); }
 void AudiS38PInterpreter::interpretComfort(twai_message_t &msg)    { parseStandardPqComfort(msg); }
-void AudiS38PInterpreter::interpretInfotainment(twai_message_t &msg) { if (msg.identifier == 0x5C1) sys_ctx->metrics.mmi_key_code = *(msg.data + 0); }
+void AudiS38PInterpreter::interpretInfotainment(twai_message_t &msg) {
+    if (msg.identifier == 0x5C1 && msg.data_length_code >= 1)
+        sys_ctx->metrics.mmi_key_code = *(msg.data + 0);
+}
 void AudiS38PInterpreter::configureUiLimits() {
     sys_ctx->normal_green = lv_color_make(220, 0, 0); // Bold Audi Instrument Red
     if (sys_ctx->rpm_meter != nullptr) lv_arc_set_range(sys_ctx->rpm_meter, 0, 8000);
@@ -68,7 +81,10 @@ void AudiQ3PQ35Interpreter::configureUiLimits() {
 // --- 4. AUDI Q7 4L ---
 void AudiQ74LInterpreter::interpretDriveTrain(twai_message_t &msg) { parseStandardPqFrame(msg); }
 void AudiQ74LInterpreter::interpretComfort(twai_message_t &msg)    { parseStandardPqComfort(msg); }
-void AudiQ74LInterpreter::interpretInfotainment(twai_message_t &msg) { if (msg.identifier == 0x5C1) sys_ctx->metrics.mmi_key_code = *(msg.data + 0); }
+void AudiQ74LInterpreter::interpretInfotainment(twai_message_t &msg) {
+    if (msg.identifier == 0x5C1 && msg.data_length_code >= 1)
+        sys_ctx->metrics.mmi_key_code = *(msg.data + 0);
+}
 void AudiQ74LInterpreter::configureUiLimits() {
     sys_ctx->normal_green = lv_color_make(200, 50, 0); // Traditional Audi Amber/Red mix
     if (sys_ctx->rpm_meter != nullptr) lv_arc_set_range(sys_ctx->rpm_meter, 0, 6000); // Diesel Utility bounds
