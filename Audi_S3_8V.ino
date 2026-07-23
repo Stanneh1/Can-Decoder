@@ -1175,24 +1175,40 @@ void startTwaiChannel(int port_idx, int tx_pin, int rx_pin) {
 
   // --- DYNAMIC HARDWARE ACCEPTANCE FILTERING ---
   if (port_idx == 0) {
-      // M-3: Channel 0 carries both powertrain frames and UDS diagnostic
-      //      responses (0x7E8-0x7EF).  The two ID ranges are too far apart
-      //      to express with a single SJA1000-compatible filter mask without
-      //      admitting unrelated IDs.  Accept-all on this channel and rely on
-      //      the software switch-case in the parsers to ignore irrelevant IDs.
+      // M-3: Channel 0 carries both powertrain frames (0x000–0x3FF) and UDS
+      //      diagnostic responses (0x7E8–0x7EF).  The two ranges are too far
+      //      apart to express with a single SJA1000-compatible mask without
+      //      inadvertently admitting unrelated IDs.  Accept-all is used and
+      //      irrelevant IDs are dropped in software by the parser switch-cases.
+      //
+      //      Performance note: on a live powertrain bus this can deliver many
+      //      hundreds of frames/s to the RX queue.  To protect against overrun,
+      //      the TWAI RX queue depth should be set to at least 32 entries in the
+      //      t_cfg initialisation above, and the Core-1 processInboundFrames
+      //      loop must drain the queue faster than it fills.  If the hardware
+      //      ever supports dual-filter mode for non-contiguous ranges, that would
+      //      be a cleaner alternative.
       f_cfg = TWAI_FILTER_CONFIG_ACCEPT_ALL();
   } 
   else if (port_idx == 1) {
-      // Channel 1: Comfort Convenience Bus Filter – accept IDs 0x300–0x3FF.
-      // SJA1000 filter convention: mask bit=1 → don't care, mask bit=0 → must match code.
-      // acceptance_code top-3 bits = 0b011 (0x300..0x3FF range).
-      // ~(0x700U << CAN_FILTER_ID_SHIFT) makes bits[31:29] compare and all others don't care.
+      // Channel 1: Comfort/Convenience bus — hardware-filter to 0x300–0x3FF.
+      //
+      // SJA1000 filter convention: mask bit = 1 → don't care; bit = 0 → must
+      // match the corresponding acceptance_code bit.
+      //
+      // The top-3 bits of the 11-bit ID for 0x300–0x3FF are always 0b011 (hex
+      // 0x3xx).  Setting those 3 bits in acceptance_code and clearing them in the
+      // mask constrains the hardware to the entire 0x300–0x3FF block.  The
+      // remaining 8 lower ID bits are left as don't-care (mask bits = 1) so that
+      // every ID in the block is admitted — this is intentional and correct.
       f_cfg.acceptance_code = (0x300U << CAN_FILTER_ID_SHIFT);
       f_cfg.acceptance_mask = ~(0x700U << CAN_FILTER_ID_SHIFT);
       f_cfg.single_filter = true;
   } 
   else if (port_idx == 2) {
-      // Channel 2: Infotainment Bus Filter – accept IDs 0x500–0x5FF.
+      // Channel 2: Infotainment bus — hardware-filter to 0x500–0x5FF.
+      // Same three-bit masking strategy as Channel 1; top bits = 0b101 (0x5xx).
+      // Lower 8 bits are intentionally don't-care to admit the full block.
       f_cfg.acceptance_code = (0x500U << CAN_FILTER_ID_SHIFT);
       f_cfg.acceptance_mask = ~(0x700U << CAN_FILTER_ID_SHIFT);
       f_cfg.single_filter = true;
