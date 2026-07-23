@@ -92,6 +92,7 @@ struct BenchVinSignature {
 };
 
 static constexpr char kVinYearTokens[] = "123456789ABCDEFGHJKLMNPRSTVWXY";
+static constexpr uint32_t FULLTEST_STEP_INTERVAL_MS = 3000;
 
 static const BenchVinSignature kBenchVinSignatures[] = {
     // Audi
@@ -133,7 +134,7 @@ void beginFullBenchVinTest() {
     g_fulltest_active = true;
     g_fulltest_sig_index = 0;
     g_fulltest_year_index = 0;
-    g_fulltest_last_step_ms = millis() - 3000; // Trigger first VIN immediately.
+    g_fulltest_last_step_ms = millis() - FULLTEST_STEP_INTERVAL_MS; // Trigger first VIN immediately.
     const size_t total = (sizeof(kBenchVinSignatures) / sizeof(kBenchVinSignatures[0])) * (sizeof(kVinYearTokens) - 1);
     Serial.printf("\n[FULLTEST] Starting VIN sweep (%u signatures x %u years = %u test VINs)\n",
                   (unsigned)(sizeof(kBenchVinSignatures) / sizeof(kBenchVinSignatures[0])),
@@ -144,7 +145,7 @@ void beginFullBenchVinTest() {
 
 void runFullBenchVinTestStep() {
     if (!g_fulltest_active) return;
-    if (millis() - g_fulltest_last_step_ms < 3000) return;
+    if (millis() - g_fulltest_last_step_ms < FULLTEST_STEP_INTERVAL_MS) return;
     g_fulltest_last_step_ms = millis();
 
     const size_t sig_count = sizeof(kBenchVinSignatures) / sizeof(kBenchVinSignatures[0]);
