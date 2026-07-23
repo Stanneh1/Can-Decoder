@@ -119,6 +119,9 @@ struct BenchVinSignature {
 
 static constexpr char kVinYearTokens[] = "123456789ABCDEFGHJKLMNPRSTVWXY";
 static constexpr uint32_t FULLTEST_STEP_INTERVAL_MS = 3000;
+static constexpr int FULLTEST_BASE_YEAR = 2001;
+// Temporary fixed year cap requested for bench test runs (RTC integration later).
+static constexpr int FULLTEST_CURRENT_YEAR = 2016;
 
 static const BenchVinSignature kBenchVinSignatures[] = {
     // Audi
@@ -143,6 +146,8 @@ static bool g_fulltest_active = false;
 static size_t g_fulltest_sig_index = 0;
 static size_t g_fulltest_year_index = 0;
 static uint32_t g_fulltest_last_step_ms = 0;
+static size_t g_fulltest_total_steps = 0;
+static size_t g_fulltest_completed_steps = 0;
 
 void applyUiProfileForCurrentInterpreter() {
     if (g_interpreter_mutex != NULL) xSemaphoreTake(g_interpreter_mutex, portMAX_DELAY);
@@ -156,16 +161,68 @@ void buildBenchVin(const BenchVinSignature& sig, char year_token, char* out_vin_
     snprintf(out_vin_18, 18, "%sZZZ%s0%cA000000", sig.wmi, sig.chassis, year_token);
 }
 
+int benchVinYearFromToken(char token) {
+    const char* match = strchr(kVinYearTokens, token);
+    if (match == nullptr) return 0;
+    return FULLTEST_BASE_YEAR + (int)(match - kVinYearTokens);
+}
+
+bool isBenchYearValidForChassis(const char* chassis, int year) {
+    // Enforce fixed current year cap for bench test sweeps.
+    if (year > FULLTEST_CURRENT_YEAR) return false;
+
+    // A3/S3 generation sanity mapping so fulltest doesn't generate impossible
+    // combinations like "8P + 2023" or "8Y + 2008".
+    if (strcmp(chassis, "8P") == 0) return (year >= 2003 && year <= 2013);
+    if (strcmp(chassis, "8V") == 0) return (year >= 2013 && year <= 2020);
+    if (strcmp(chassis, "GY") == 0 || strcmp(chassis, "8Y") == 0) return (year >= 2020);
+
+    // For other signatures, keep sweep broad but still capped to current year.
+    return year >= FULLTEST_BASE_YEAR;
+}
+
+size_t countValidFulltestSteps() {
+    const size_t sig_count = sizeof(kBenchVinSignatures) / sizeof(kBenchVinSignatures[0]);
+    const size_t year_count = sizeof(kVinYearTokens) - 1; // exclude null terminator
+    size_t total = 0;
+
+    for (size_t s = 0; s < sig_count; s++) {
+        for (size_t y = 0; y < year_count; y++) {
+            const int year = benchVinYearFromToken(kVinYearTokens[y]);
+            if (isBenchYearValidForChassis(kBenchVinSignatures[s].chassis, year)) {
+                total++;
+            }
+        }
+    }
+    return total;
+}
+
+void advanceFulltestCursor(size_t year_count) {
+    g_fulltest_year_index++;
+    if (g_fulltest_year_index >= year_count) {
+        g_fulltest_year_index = 0;
+        g_fulltest_sig_index++;
+    }
+}
+
 void beginFullBenchVinTest() {
-    g_fulltest_active = true;
     g_fulltest_sig_index = 0;
     g_fulltest_year_index = 0;
+    g_fulltest_completed_steps = 0;
+    g_fulltest_total_steps = countValidFulltestSteps();
+
+    if (g_fulltest_total_steps == 0) {
+        g_fulltest_active = false;
+        Serial.println("\n[FULLTEST] No valid VIN combinations for current fulltest year cap.");
+        return;
+    }
+
+    g_fulltest_active = true;
     g_fulltest_last_step_ms = millis() - FULLTEST_STEP_INTERVAL_MS; // Trigger first VIN immediately.
-    const size_t total = (sizeof(kBenchVinSignatures) / sizeof(kBenchVinSignatures[0])) * (sizeof(kVinYearTokens) - 1);
-    Serial.printf("\n[FULLTEST] Starting VIN sweep (%u signatures x %u years = %u test VINs)\n",
+    Serial.printf("\n[FULLTEST] Starting VIN sweep (%u signatures, current-year cap %u => %u valid test VINs)\n",
                   (unsigned)(sizeof(kBenchVinSignatures) / sizeof(kBenchVinSignatures[0])),
-                  (unsigned)(sizeof(kVinYearTokens) - 1),
-                  (unsigned)total);
+                  (unsigned)FULLTEST_CURRENT_YEAR,
+                  (unsigned)g_fulltest_total_steps);
     Serial.println("[FULLTEST] A new VIN will be injected every 3 seconds.");
 }
 
@@ -176,25 +233,32 @@ void runFullBenchVinTestStep() {
 
     const size_t sig_count = sizeof(kBenchVinSignatures) / sizeof(kBenchVinSignatures[0]);
     const size_t year_count = sizeof(kVinYearTokens) - 1; // exclude null terminator
-    const size_t step_index = (g_fulltest_sig_index * year_count) + g_fulltest_year_index + 1;
-    const size_t total_steps = sig_count * year_count;
 
-    char vin[18];
-    buildBenchVin(kBenchVinSignatures[g_fulltest_sig_index], kVinYearTokens[g_fulltest_year_index], vin);
-    Serial.printf("\n[FULLTEST] (%u/%u) Testing VIN: %s\n", (unsigned)step_index, (unsigned)total_steps, vin);
-    decodeAndPrintVehicleIdentity(vin);
-    applyUiProfileForCurrentInterpreter();
+    while (g_fulltest_sig_index < sig_count) {
+        const BenchVinSignature& sig = kBenchVinSignatures[g_fulltest_sig_index];
+        const char year_token = kVinYearTokens[g_fulltest_year_index];
+        const int year = benchVinYearFromToken(year_token);
+        const bool valid = isBenchYearValidForChassis(sig.chassis, year);
 
-    g_fulltest_year_index++;
-    if (g_fulltest_year_index >= year_count) {
-        g_fulltest_year_index = 0;
-        g_fulltest_sig_index++;
+        if (valid) {
+            char vin[18];
+            buildBenchVin(sig, year_token, vin);
+            g_fulltest_completed_steps++;
+            Serial.printf("\n[FULLTEST] (%u/%u) Testing VIN: %s\n",
+                          (unsigned)g_fulltest_completed_steps,
+                          (unsigned)g_fulltest_total_steps,
+                          vin);
+            decodeAndPrintVehicleIdentity(vin);
+            applyUiProfileForCurrentInterpreter();
+            advanceFulltestCursor(year_count);
+            return;
+        }
+
+        advanceFulltestCursor(year_count);
     }
 
-    if (g_fulltest_sig_index >= sig_count) {
-        g_fulltest_active = false;
-        Serial.println("\n[FULLTEST] VIN sweep completed.");
-    }
+    g_fulltest_active = false;
+    Serial.println("\n[FULLTEST] VIN sweep completed.");
 }
 
 
