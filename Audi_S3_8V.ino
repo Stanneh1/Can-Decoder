@@ -85,6 +85,91 @@ AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
 static uint32_t last_web_broadcast = 0;
 
+// --- BENCH FULLTEST VIN SWEEP CONFIGURATION ---
+struct BenchVinSignature {
+    const char* wmi;
+    const char* chassis;
+};
+
+static constexpr char kVinYearTokens[] = "123456789ABCDEFGHJKLMNPRSTVWXY";
+
+static const BenchVinSignature kBenchVinSignatures[] = {
+    // Audi
+    {"WAU", "8P"}, {"WAU", "8V"}, {"WAU", "GY"}, {"WAU", "8Y"}, {"WAU", "8K"}, {"WAU", "8W"}, {"WAU", "F4"},
+    {"WAU", "4F"}, {"WAU", "4G"}, {"WAU", "4K"}, {"WAU", "8T"}, {"WAU", "8F"}, {"WAU", "4H"}, {"WAU", "4N"},
+    {"WAU", "8U"}, {"WAU", "F3"}, {"WAU", "8R"}, {"WAU", "FY"}, {"WAU", "4L"}, {"WAU", "4M"}, {"WAU", "8J"},
+    {"WAU", "8S"}, {"WAU", "GA"}, {"WAU", "8X"}, {"WAU", "GB"},
+    // Volkswagen
+    {"WVW", "1K"}, {"WVW", "5K"}, {"WVW", "AJ"}, {"WVW", "5G"}, {"WVW", "BA"}, {"WVW", "AM"}, {"WVW", "AU"},
+    {"WVW", "CD"}, {"WVW", "3C"}, {"WVW", "AN"}, {"WVW", "3G"}, {"WVW", "CB"}, {"WVW", "A3"}, {"WVW", "13"},
+    {"WVW", "5N"}, {"WVW", "AD"}, {"WVW", "AX"}, {"WVW", "CT"}, {"WVW", "6R"}, {"WVW", "6C"}, {"WVW", "AW"},
+    {"WVW", "3H"},
+    // Seat / Cupra
+    {"VSS", "1P"}, {"VSS", "5F"}, {"VSS", "KL"}, {"VSS", "KJ"},
+    // Skoda
+    {"TMB", "1Z"}, {"TMB", "5E"}, {"TMB", "NX"}, {"TMB", "3T"}, {"TMB", "3V"},
+    // Porsche
+    {"WP0", "92"}, {"WP0", "9B"}
+};
+
+static bool g_fulltest_active = false;
+static size_t g_fulltest_sig_index = 0;
+static size_t g_fulltest_year_index = 0;
+static uint32_t g_fulltest_last_step_ms = 0;
+
+void applyUiProfileForCurrentInterpreter() {
+    if (g_interpreter_mutex != NULL) xSemaphoreTake(g_interpreter_mutex, portMAX_DELAY);
+    if (sys_ctx != nullptr && sys_ctx->interpreter != nullptr) {
+        sys_ctx->interpreter->configureUiLimits();
+    }
+    if (g_interpreter_mutex != NULL) xSemaphoreGive(g_interpreter_mutex);
+}
+
+void buildBenchVin(const BenchVinSignature& sig, char year_token, char* out_vin_18) {
+    snprintf(out_vin_18, 18, "%sZZZ%s0%cA000000", sig.wmi, sig.chassis, year_token);
+}
+
+void beginFullBenchVinTest() {
+    g_fulltest_active = true;
+    g_fulltest_sig_index = 0;
+    g_fulltest_year_index = 0;
+    g_fulltest_last_step_ms = millis() - 3000; // Trigger first VIN immediately.
+    const size_t total = (sizeof(kBenchVinSignatures) / sizeof(kBenchVinSignatures[0])) * (sizeof(kVinYearTokens) - 1);
+    Serial.printf("\n[FULLTEST] Starting VIN sweep (%u signatures x %u years = %u test VINs)\n",
+                  (unsigned)(sizeof(kBenchVinSignatures) / sizeof(kBenchVinSignatures[0])),
+                  (unsigned)(sizeof(kVinYearTokens) - 1),
+                  (unsigned)total);
+    Serial.println("[FULLTEST] A new VIN will be injected every 3 seconds.");
+}
+
+void runFullBenchVinTestStep() {
+    if (!g_fulltest_active) return;
+    if (millis() - g_fulltest_last_step_ms < 3000) return;
+    g_fulltest_last_step_ms = millis();
+
+    const size_t sig_count = sizeof(kBenchVinSignatures) / sizeof(kBenchVinSignatures[0]);
+    const size_t year_count = sizeof(kVinYearTokens) - 1; // exclude null terminator
+    const size_t step_index = (g_fulltest_sig_index * year_count) + g_fulltest_year_index + 1;
+    const size_t total_steps = sig_count * year_count;
+
+    char vin[18];
+    buildBenchVin(kBenchVinSignatures[g_fulltest_sig_index], kVinYearTokens[g_fulltest_year_index], vin);
+    Serial.printf("\n[FULLTEST] (%u/%u) Testing VIN: %s\n", (unsigned)step_index, (unsigned)total_steps, vin);
+    decodeAndPrintVehicleIdentity(vin);
+    applyUiProfileForCurrentInterpreter();
+
+    g_fulltest_year_index++;
+    if (g_fulltest_year_index >= year_count) {
+        g_fulltest_year_index = 0;
+        g_fulltest_sig_index++;
+    }
+
+    if (g_fulltest_sig_index >= sig_count) {
+        g_fulltest_active = false;
+        Serial.println("\n[FULLTEST] VIN sweep completed.");
+    }
+}
+
 
 // --- EMBEDDED DASHBOARD HTML PAGE ---
 const char index_html[] PROGMEM = R"rawhtml(
@@ -450,22 +535,20 @@ void loop() {
     String testVin = Serial.readStringUntil('\n');
     testVin.trim(); // Clean trailing whitespace feeds safely
     
-    if (testVin.length() == 17) {
+    if (testVin.equalsIgnoreCase("fulltest")) {
+        beginFullBenchVinTest();
+    } else if (testVin.length() == 17) {
+        g_fulltest_active = false; // Manual single-VIN injection cancels any running full test sweep.
         Serial.println("\n[DEBUG] Injecting Bench Test VIN into Profile Matrix...");
         decodeAndPrintVehicleIdentity(testVin.c_str());
-        
-        // Dynamically recalculate and apply the visual display scales on your desk!
-        // Take interpreter mutex since configureUiLimits accesses sys_ctx->interpreter.
-        if (g_interpreter_mutex != NULL) xSemaphoreTake(g_interpreter_mutex, portMAX_DELAY);
-        if (sys_ctx != nullptr && sys_ctx->interpreter != nullptr) {
-            sys_ctx->interpreter->configureUiLimits();
-            Serial.println("[DEBUG] UI morphing execution complete.");
-        }
-        if (g_interpreter_mutex != NULL) xSemaphoreGive(g_interpreter_mutex);
+        applyUiProfileForCurrentInterpreter();
+        Serial.println("[DEBUG] UI morphing execution complete.");
     } else {
-        Serial.println("[DEBUG] Invalid VIN footprint. Must be exactly 17 characters long.");
+        Serial.println("[DEBUG] Invalid input. Enter a 17-char VIN or type 'fulltest'.");
     }
   }
+
+  runFullBenchVinTestStep();
 
   // --- FIXED TELEMETRY SWEEP INTERFACE GATING ---
   // (Removed the network family restrictions so it continues sweeping across ALL bench testing profiles!)
@@ -811,7 +894,7 @@ void decodeAndPrintVehicleIdentity(const char* vin) {
         active_vehicle_profile.electrical_bus = "HIGH-SPEED MQB CAN"; 
         active_vehicle_profile.network_generation = SERIES_MQB_A_CLASS; 
     }
-    else if (strcmp(chassis, "GY") == 0) { 
+    else if (strcmp(chassis, "GY") == 0 || strcmp(chassis, "8Y") == 0) { 
         active_vehicle_profile.model_name = "Audi A3 / S3 / RS3 (MQB EVO 8Y)"; 
         active_vehicle_profile.electrical_bus = "MQB EVO CAN-FD/CAN"; 
         active_vehicle_profile.network_generation = SERIES_MQB_A_CLASS; 
@@ -1091,7 +1174,7 @@ void decodeAndPrintVehicleIdentity(const char* vin) {
     // --- GROUP 1: MQB & MQB-EVO HIGH-SPEED TRANSLATION CLASS MATRIX ---
     if (active_vehicle_profile.network_generation == SERIES_MQB_A_CLASS) {
         if (strcmp(chassis, "8V") == 0)       sys_ctx->interpreter = new AudiS38VInterpreter();
-        else if (strcmp(chassis, "GY") == 0)  sys_ctx->interpreter = new AudiRS3GYInterpreter();
+        else if (strcmp(chassis, "GY") == 0 || strcmp(chassis, "8Y") == 0)  sys_ctx->interpreter = new AudiRS3GYInterpreter();
         else if (strcmp(chassis, "5G") == 0 || strcmp(chassis, "BA") == 0 || strcmp(chassis, "AM") == 0 || strcmp(chassis, "AU") == 0) sys_ctx->interpreter = new VwGolf7Interpreter();
         else if (strcmp(chassis, "CD") == 0)  sys_ctx->interpreter = new VwGolf8Interpreter();
         else if (strcmp(chassis, "3G") == 0 || strcmp(chassis, "CB") == 0) sys_ctx->interpreter = new VwPassatB8Interpreter();
