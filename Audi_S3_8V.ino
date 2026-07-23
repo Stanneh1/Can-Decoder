@@ -1047,7 +1047,7 @@ void decodeAndPrintVehicleIdentity(const char* vin) {
     }
 
     // =========================================================================
-    // 3. UNIVERSAL MODEL YEAR LOOKUP ARRAY - POSITION 10
+    // 3. UNIVERSAL MODEL YEAR LOOKUP ARRAY - POSITION 10 (1-based VIN index = vin[9])
     // =========================================================================
     char year_char = vin[9];
     active_vehicle_profile.production_year = 0; // Baseline safety state
