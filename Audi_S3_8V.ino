@@ -245,6 +245,48 @@ void advanceFulltestCursor(size_t year_count) {
     }
 }
 
+void printSystemStatus() {
+    Serial.println();
+    Serial.println("=== SYSTEM STATUS SUMMARY ===");
+
+    // CAN channel health check (non-destructive: queries running drivers in place)
+    const char* kChannelNames[] = { "Drive Train", "Comfort", "Infotainment" };
+    for (int ch = 0; ch < 3; ch++) {
+        twai_status_info_t info;
+        if (twai_get_status_info_v2(twai_ports[ch], &info) == ESP_OK) {
+            const char* state_str = "UNKNOWN";
+            switch (info.state) {
+                case TWAI_STATE_STOPPED:   state_str = "STOPPED";   break;
+                case TWAI_STATE_RUNNING:   state_str = "RUNNING";   break;
+                case TWAI_STATE_BUS_OFF:   state_str = "BUS-OFF";   break;
+                case TWAI_STATE_RECOVERING: state_str = "RECOVERING"; break;
+            }
+            Serial.printf("[CAN CH%d] %-15s | State: %-10s | TX Err: %u  RX Err: %u\n",
+                          ch, kChannelNames[ch], state_str,
+                          (unsigned)info.tx_error_counter, (unsigned)info.rx_error_counter);
+        } else {
+            Serial.printf("[CAN CH%d] %-15s | Status query failed (driver not installed?)\n",
+                          ch, kChannelNames[ch]);
+        }
+    }
+
+#if _WIFI_ACTIVE
+    if (g_web_dashboard_ready) {
+        Serial.print("[WIFI] Dashboard URL: http://");
+        Serial.println(WiFi.softAPIP());
+        Serial.print("[WIFI] SSID: ");
+        Serial.println(AP_SSID);
+    } else {
+        Serial.println("[WIFI] Hotspot not active.");
+    }
+#else
+    Serial.println("[WIFI] Hotspot disabled at compile time.");
+#endif
+
+    Serial.println("=============================");
+    Serial.println();
+}
+
 void beginFullBenchVinTest() {
     g_fulltest_sig_index = 0;
     g_fulltest_year_index = 0;
@@ -676,7 +718,15 @@ void loop() {
     String testVin = Serial.readStringUntil('\n');
     testVin.trim(); // Clean trailing whitespace feeds safely
     
-    if (testVin.equalsIgnoreCase("fulltest")) {
+    if (testVin.equalsIgnoreCase("stoptest")) {
+        if (g_fulltest_active) {
+            g_fulltest_active = false;
+            Serial.println("\n[FULLTEST] Test stopped by user command.");
+        } else {
+            Serial.println("\n[STOPTEST] No test was running.");
+        }
+        printSystemStatus();
+    } else if (testVin.equalsIgnoreCase("fulltest")) {
         beginFullBenchVinTest();
     } else if (testVin.length() == 17) {
         g_fulltest_active = false; // Manual single-VIN injection cancels any running full test sweep.
@@ -685,7 +735,7 @@ void loop() {
         applyUiProfileForCurrentInterpreter();
         Serial.println("[DEBUG] UI morphing execution complete.");
     } else {
-        Serial.println("[DEBUG] Invalid input. Enter a 17-char VIN or type 'fulltest'.");
+        Serial.println("[DEBUG] Invalid input. Enter a 17-char VIN, type 'fulltest', or type 'stoptest'.");
     }
   }
 
