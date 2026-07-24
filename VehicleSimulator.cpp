@@ -18,7 +18,10 @@ void runBenchTelemetrySimulation(float target_rpm, float target_boost, float tar
 
     // 2. Safely process hardware frame simulation ONLY if a real vehicle network is locked!
     // This stops the hardware registers from filling up and freezing the chip on your open desk.
-    if (active_vehicle_profile.network_generation != SERIES_UNKNOWN) {
+    // C-5: Also guard on g_twai0_valid: the bus-off recovery on Core 1 temporarily uninstalls
+    //      and reinstalls the port-0 driver.  Transmitting with a stale handle causes a crash.
+    if (active_vehicle_profile.network_generation != SERIES_UNKNOWN &&
+        g_twai0_valid.load(std::memory_order_acquire)) {
         twai_message_t tx_msg;
         tx_msg.extd = 0;
         tx_msg.rtr = 0;

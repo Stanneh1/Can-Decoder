@@ -71,6 +71,11 @@ static char global_ws_buffer[256]; // Allocates a fixed memory space block
 static std::atomic<bool> ws_payload_ready{false};
 static std::atomic<bool> ui_profile_refresh_pending{false};
 
+// g_twai0_valid: set false before port-0 bus-off recovery uninstall, true after reinstall.
+// Prevents Core 0 runBenchTelemetrySimulation from using the handle while it is invalid.
+// Starts false; set true in setup() after startTwaiChannel(0) succeeds.
+std::atomic<bool> g_twai0_valid{false};
+
 // --- MULTICORE SYNCHRONISATION PRIMITIVES ---
 // g_metrics_mux : protects sys_ctx->metrics fields (Core-0 bench-sim writes vs
 //                 Core-1 interpreter writes and UI reads).
@@ -527,9 +532,20 @@ void CockpitCoreProcessor(void *pvParameters) {
         if (twai_get_status_info_v2(twai_ports[ch], &info) == ESP_OK) {
           if (info.state == TWAI_STATE_BUS_OFF) {
             Serial.printf("[RECOVERY] CAN Channel %d bus-off detected. Reinitialising...\n", ch);
+            // C-5: Port 0 is also written by Core 0 (runBenchTelemetrySimulation).
+            //      Signal Core 0 to stop using the handle, then wait long enough for
+            //      any in-flight twai_transmit_v2(timeout=0) call to return before
+            //      we uninstall the driver.  5 ms >> the sub-microsecond non-blocking
+            //      transmit call, so the handle is guaranteed to be unused by the
+            //      time twai_driver_uninstall_v2 runs.
+            if (ch == 0) {
+              g_twai0_valid.store(false, std::memory_order_release);
+              vTaskDelay(pdMS_TO_TICKS(5));
+            }
             twai_stop_v2(twai_ports[ch]);
             twai_driver_uninstall_v2(twai_ports[ch]);
             startTwaiChannel(ch, kCanTxPins[ch], kCanRxPins[ch]);
+            if (ch == 0) g_twai0_valid.store(true, std::memory_order_release);
           }
         }
       }
@@ -635,6 +651,7 @@ void setup() {
 
   // 2. PRODUCTION TWAI INTERFACE STARTUP
   startTwaiChannel(0, CH0_TX, CH0_RX);  delay(100);
+  g_twai0_valid.store(true, std::memory_order_release);  // Port 0 handle is now valid
   startTwaiChannel(1, CH1_TX, CH1_RX);  delay(100);
   startTwaiChannel(2, CH2_TX, CH2_RX);  delay(100);
 

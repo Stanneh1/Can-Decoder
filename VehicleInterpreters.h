@@ -5,6 +5,7 @@
 #include "driver/twai.h"
 #include <lvgl.h>
 #include "freertos/portmacro.h"
+#include <atomic>
 
 // --- CAN FILTER HELPER ---
 // SJA1000/ESP32 TWAI: standard 11-bit IDs are stored in bits [31:21] of the
@@ -89,6 +90,12 @@ extern lv_color_t color_normal_green;
 // g_interpreter_mutex: FreeRTOS mutex protecting sys_ctx->interpreter and active_vehicle_profile.
 extern portMUX_TYPE      g_metrics_mux;
 extern SemaphoreHandle_t g_interpreter_mutex;
+
+// g_twai0_valid: atomic flag that is cleared to false before the bus-off recovery on Core 1
+// uninstalls the TWAI port-0 driver, and restored to true once the reinstall completes.
+// Core 0's runBenchTelemetrySimulation checks this flag before every twai_transmit_v2 call
+// on port 0, preventing a use-after-free crash when the handle is momentarily invalid.
+extern std::atomic<bool> g_twai0_valid;
 
 // =========================================================================
 //  BENCH COMPACT GENERIC FALLBACK INTERPRETER BLUEPRINT
