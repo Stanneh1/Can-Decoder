@@ -3,6 +3,7 @@
 #include <ESPAsyncWebServer.h>
 #include <AsyncTCP.h>
 #include <ArduinoJson.h>
+#include <Preferences.h>
 #include <atomic>
 #include <string_view>
 #if __has_include(<soc/soc_caps.h>)
@@ -58,8 +59,8 @@ static constexpr uint32_t SERIAL_BAUD_RATE = 921600; // USB CDC virtual port; 92
 //   A guessable password allows unauthenticated access to live CAN telemetry.
 //   Minimum recommended: 12 characters, mixed case + digits + symbols.
 #define AP_SSID     "Audi_S3_Telemetry"
-#define AP_PASSWORD "ChangeMe_S3AP!"   // <-- REPLACE BEFORE DEPLOYMENT
-// SECURITY: Change AP_PASSWORD above before deploying to a real vehicle.
+#define AP_PASSWORD_DEFAULT "ChangeMe_S3AP!"   // <-- REPLACE BEFORE DEPLOYMENT
+// SECURITY: Change AP_PASSWORD_DEFAULT above before deploying to a real vehicle.
 
 // --- THREAD-SAFE FIXED CHAR BUFFER ARRAY ---
 static char global_ws_buffer[512]; // Extended to accommodate new telemetry fields
@@ -123,6 +124,15 @@ AsyncWebSocket ws("/ws");
 static uint32_t last_web_broadcast = 0;
 static bool g_web_dashboard_ready = false;
 static bool g_wifi_routes_registered = false;  // Ensure server routes are only added once.
+static char g_ap_password[64] = AP_PASSWORD_DEFAULT;
+static bool g_serial_waiting_for_password = false;
+portMUX_TYPE g_ap_password_queue_mux = portMUX_INITIALIZER_UNLOCKED;
+static char g_pending_ap_password[64] = {0};
+static bool g_pending_ap_password_ready = false;
+
+static lv_obj_t *g_pwd_modal = nullptr;
+static lv_obj_t *g_pwd_textarea = nullptr;
+static lv_obj_t *g_pwd_keyboard = nullptr;
 
 // --- BENCH FULLTEST VIN SWEEP CONFIGURATION ---
 struct BenchVinSignature {
@@ -333,6 +343,104 @@ void printSystemStatus() {
     Serial.println();
 }
 
+const char* validateApPassword(const char* password) {
+    if (password == nullptr) return "Password cannot be empty.";
+    const size_t len = strlen(password);
+    if (len < 8 || len > 63) return "Password must be 8 to 63 characters.";
+    for (size_t i = 0; i < len; i++) {
+        const unsigned char c = static_cast<unsigned char>(password[i]);
+        if (c < 32 || c > 126) return "Password must use printable ASCII characters only.";
+    }
+    return nullptr;
+}
+
+bool saveApPasswordToNvs(const char* password) {
+    Preferences prefs;
+    if (!prefs.begin("can-decoder", false)) {
+        Serial.println("[WIFI] ERROR: Failed to open NVS namespace for password save.");
+        return false;
+    }
+    const size_t bytes = prefs.putString("ap_pass", password);
+    prefs.end();
+    return bytes > 0;
+}
+
+void loadApPasswordFromNvs() {
+    Preferences prefs;
+    if (!prefs.begin("can-decoder", true)) {
+        Serial.println("[WIFI] WARNING: Could not open NVS namespace. Using default AP password.");
+        return;
+    }
+    String saved = prefs.getString("ap_pass", "");
+    prefs.end();
+
+    if (saved.length() == 0) return;
+
+    const char* validation_error = validateApPassword(saved.c_str());
+    if (validation_error != nullptr) {
+        Serial.printf("[WIFI] WARNING: Saved AP password rejected: %s Using default password.\n", validation_error);
+        return;
+    }
+
+    snprintf(g_ap_password, sizeof(g_ap_password), "%s", saved.c_str());
+    Serial.println("[WIFI] Loaded AP password from NVS.");
+}
+
+bool queueApPasswordUpdate(const char* password) {
+    if (password == nullptr) return false;
+    const char* validation_error = validateApPassword(password);
+    if (validation_error != nullptr) return false;
+
+    portENTER_CRITICAL(&g_ap_password_queue_mux);
+    snprintf(g_pending_ap_password, sizeof(g_pending_ap_password), "%s", password);
+    g_pending_ap_password_ready = true;
+    portEXIT_CRITICAL(&g_ap_password_queue_mux);
+    return true;
+}
+
+bool applyAndPersistApPassword(const char* password, const char* source) {
+    const char* validation_error = validateApPassword(password);
+    if (validation_error != nullptr) {
+        Serial.printf("[WIFI] %s password update rejected: %s\n", source, validation_error);
+        return false;
+    }
+
+    bool save_ok = saveApPasswordToNvs(password);
+    if (!save_ok) {
+        Serial.println("[WIFI] WARNING: Password applied but could not be saved to NVS.");
+    }
+
+    snprintf(g_ap_password, sizeof(g_ap_password), "%s", password);
+
+#if _WIFI_ACTIVE
+    if (g_web_dashboard_ready) {
+        Serial.println("[WIFI] Applying new AP password now. Restarting hotspot...");
+        stopWifiHotspot();
+        startWifiHotspot();
+    }
+#endif
+
+    Serial.printf("[WIFI] AP password updated from %s.\n", source);
+    return true;
+}
+
+void processQueuedPasswordChange() {
+    if (!g_pending_ap_password_ready) return;
+
+    char pending_password[64];
+    portENTER_CRITICAL(&g_ap_password_queue_mux);
+    if (!g_pending_ap_password_ready) {
+        portEXIT_CRITICAL(&g_ap_password_queue_mux);
+        return;
+    }
+    snprintf(pending_password, sizeof(pending_password), "%s", g_pending_ap_password);
+    g_pending_ap_password_ready = false;
+    g_pending_ap_password[0] = '\0';
+    portEXIT_CRITICAL(&g_ap_password_queue_mux);
+
+    applyAndPersistApPassword(pending_password, "UI/Web");
+}
+
 // --- WI-FI HOTSPOT RUNTIME CONTROL ---
 // NOTE: startWifiHotspot() and stopWifiHotspot() are only ever called from
 // Core 0 (setup() then loop()), which are sequential, so g_wifi_routes_registered
@@ -344,10 +452,10 @@ void startWifiHotspot() {
         return;
     }
     // Runtime password safety reminder (replaces the removed compile-time guard).
-    if (strcmp(AP_PASSWORD, "ChangeMe_S3AP!") == 0) {
-        Serial.println("[WIFI] WARNING: AP_PASSWORD is still the default. Change it before deploying to a vehicle!");
+    if (strcmp(g_ap_password, AP_PASSWORD_DEFAULT) == 0) {
+        Serial.println("[WIFI] WARNING: AP password is still the default. Change it before deploying to a vehicle!");
     }
-    if (WiFi.softAP(AP_SSID, AP_PASSWORD)) {
+    if (WiFi.softAP(AP_SSID, g_ap_password)) {
         if (!g_wifi_routes_registered) {
             ws.onEvent(onWsEvent);
             server.addHandler(&ws);
@@ -622,6 +730,10 @@ const char index_html[] PROGMEM = R"rawhtml(
     <tr><td>Production Year</td><td id="dg_year">---</td></tr>
     <tr><td>WebSocket</td><td id="dg_ws">CONNECTING</td></tr>
 </table>
+<div style="margin-top:14px">
+    <button onclick="promptPasswordChange()">Change AP Password</button>
+</div>
+<div class="unit" style="margin-top:8px">WiFi will restart after save. Reconnect using the new password.</div>
 </div>
 </div>
 
@@ -721,6 +833,22 @@ function showTab(id, btn) {
 function resetPeak() {
     if (ws && ws.readyState === WebSocket.OPEN) ws.send('RESET_PEAK');
 }
+
+function promptPasswordChange() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+        alert('WebSocket not connected.');
+        return;
+    }
+    var next = prompt('Enter new AP password (8-63 printable ASCII chars):');
+    if (next === null) return;
+    next = next.trim();
+    if (next.length < 8 || next.length > 63) {
+        alert('Password must be 8-63 characters.');
+        return;
+    }
+    ws.send('SET_AP_PASSWORD ' + next);
+    alert('Password change requested. The hotspot will restart.');
+}
 </script>
 </body>
 </html>
@@ -740,6 +868,22 @@ twai_handle_t twai_ports[3];
 
 // Forward Declarations for LVGL Touch Callbacks
 static void handleBoostResetTouch(lv_event_t * e);
+static void handlePasswordButtonTouch(lv_event_t * e);
+static void handlePasswordSaveTouch(lv_event_t * e);
+static void handlePasswordCancelTouch(lv_event_t * e);
+
+const char* validateApPassword(const char* password);
+bool saveApPasswordToNvs(const char* password);
+void loadApPasswordFromNvs();
+bool queueApPasswordUpdate(const char* password);
+bool applyAndPersistApPassword(const char* password, const char* source);
+void processQueuedPasswordChange();
+void showPasswordEditorOverlay();
+void closePasswordEditorOverlay();
+#if _WIFI_ACTIVE
+void startWifiHotspot();
+void stopWifiHotspot();
+#endif
 
 // --- DISPLAY BUFFER BLOCK ALLOCATION FOR LVGL ---
 // #define DISP_HOR_RES 800  // Set this to your specific Waveshare screen width
@@ -978,6 +1122,7 @@ void setup() {
 
   // 2b. ACTIVATE ASYNCHRONOUS COCKPIT HOTSPOT AP NETWORK
 #if _WIFI_ACTIVE
+  loadApPasswordFromNvs();
   startWifiHotspot();
 #else
   Serial.println("[SYSTEM] Wi-Fi hotspot disabled: WIFI_HOTSPOT_ENABLED=0 set at compile time.");
@@ -1054,8 +1199,22 @@ void loop() {
   if (Serial.available() > 0) {
     String testVin = Serial.readStringUntil('\n');
     testVin.trim(); // Clean trailing whitespace feeds safely
-    
-    if (testVin.equalsIgnoreCase("stoptest")) {
+
+    if (g_serial_waiting_for_password) {
+        g_serial_waiting_for_password = false;
+        if (!applyAndPersistApPassword(testVin.c_str(), "Serial console")) {
+            Serial.println("[WIFI] Password unchanged. Try 'setpass' again.");
+        }
+    } else if (testVin.equalsIgnoreCase("setpass")) {
+        g_serial_waiting_for_password = true;
+        Serial.println("[WIFI] Enter new AP password (8-63 printable ASCII chars):");
+    } else if (testVin.startsWith("setpass ")) {
+        String newPass = testVin.substring(8);
+        newPass.trim();
+        if (!applyAndPersistApPassword(newPass.c_str(), "Serial console")) {
+            Serial.println("[WIFI] Password unchanged. Use: setpass <new_password>");
+        }
+    } else if (testVin.equalsIgnoreCase("stoptest")) {
         if (g_fulltest_active) {
             g_fulltest_active = false;
             Serial.println("\n[FULLTEST] Test stopped by user command.");
@@ -1087,10 +1246,11 @@ void loop() {
         applyUiProfileForCurrentInterpreter();
         Serial.println("[DEBUG] UI morphing execution complete.");
     } else {
-        Serial.println("[DEBUG] Invalid input. Enter a 17-char VIN, 'fulltest', 'stoptest', 'comforttest', 'wifi on', or 'wifi off'.");
+        Serial.println("[DEBUG] Invalid input. Enter a 17-char VIN, 'fulltest', 'stoptest', 'comforttest', 'wifi on', 'wifi off', or 'setpass'.");
     }
   }
 
+  processQueuedPasswordChange();
   runFullBenchVinTestStep();
 
   // --- FIXED TELEMETRY SWEEP INTERFACE GATING ---
@@ -1230,6 +1390,14 @@ void buildCockpitUI() {
   lbl_diag = lv_label_create(t4);
   lv_obj_align(lbl_diag, LV_ALIGN_TOP_LEFT, 20, 20);
   lv_obj_set_style_text_color(lbl_diag, lv_color_white(), 0);
+
+  lv_obj_t *pwd_btn = lv_btn_create(t4);
+  lv_obj_set_size(pwd_btn, 300, 60);
+  lv_obj_align(pwd_btn, LV_ALIGN_BOTTOM_MID, 0, -24);
+  lv_obj_add_event_cb(pwd_btn, handlePasswordButtonTouch, LV_EVENT_CLICKED, NULL);
+  lv_obj_t *pwd_lbl = lv_label_create(pwd_btn);
+  lv_label_set_text(pwd_lbl, "Set WiFi Password");
+  lv_obj_center(pwd_lbl);
 
   // =========================================================================
   // DYNAMIC ARCHITECTURE LOOKUP IMPLEMENTATION
@@ -1393,7 +1561,7 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventTyp
       // C-3: Copy into a local buffer instead of writing data[len]=0, which
       //      writes one byte past the end of the AsyncTCP receive buffer and
       //      corrupts the heap.
-      char cmd[32];
+      char cmd[96];
       size_t copy_len = (len < sizeof(cmd) - 1) ? len : (sizeof(cmd) - 1);
       memcpy(cmd, data, copy_len);
       cmd[copy_len] = '\0';
@@ -1404,6 +1572,15 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventTyp
         sys_ctx->metrics.peak_boost_bar = 0.0;
         portEXIT_CRITICAL(&g_metrics_mux);
         Serial.println("[WEB EVENT] Peak Turbo metrics zeroed out via remote command.");
+      } else if (strncmp(cmd, "SET_AP_PASSWORD ", 16) == 0) {
+        const char* candidate = cmd + 16;
+        if (queueApPasswordUpdate(candidate)) {
+            client->text("{\"ok\":true,\"msg\":\"Password change queued. Hotspot restarting.\"}");
+            Serial.println("[WEB EVENT] AP password update requested by web UI.");
+        } else {
+            client->text("{\"ok\":false,\"msg\":\"Invalid AP password. Use 8-63 printable ASCII chars.\"}");
+            Serial.println("[WEB EVENT] AP password update rejected (invalid format).");
+        }
       }
     }
   }
@@ -1425,6 +1602,77 @@ static void handleBoostResetTouch(lv_event_t * e) {
   sys_ctx->metrics.peak_boost_bar = 0.0;
   portEXIT_CRITICAL(&g_metrics_mux);
   Serial.println("[UI EVENT] Historical Peak Boost memory register zeroed out.");
+}
+
+void showPasswordEditorOverlay() {
+  if (g_pwd_modal != nullptr) return;
+
+  g_pwd_modal = lv_obj_create(lv_scr_act());
+  lv_obj_set_size(g_pwd_modal, DISP_HOR_RES - 120, DISP_VER_RES - 120);
+  lv_obj_center(g_pwd_modal);
+
+  lv_obj_t *title = lv_label_create(g_pwd_modal);
+  lv_label_set_text(title, "Enter new WiFi AP password (8-63 chars)");
+  lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 16);
+
+  g_pwd_textarea = lv_textarea_create(g_pwd_modal);
+  lv_obj_set_width(g_pwd_textarea, DISP_HOR_RES - 220);
+  lv_obj_align(g_pwd_textarea, LV_ALIGN_TOP_MID, 0, 56);
+  lv_textarea_set_one_line(g_pwd_textarea, true);
+  lv_textarea_set_password_mode(g_pwd_textarea, true);
+  lv_textarea_set_max_length(g_pwd_textarea, 63);
+
+  lv_obj_t *save_btn = lv_btn_create(g_pwd_modal);
+  lv_obj_set_size(save_btn, 150, 50);
+  lv_obj_align(save_btn, LV_ALIGN_TOP_LEFT, 40, 112);
+  lv_obj_add_event_cb(save_btn, handlePasswordSaveTouch, LV_EVENT_CLICKED, NULL);
+  lv_obj_t *save_lbl = lv_label_create(save_btn);
+  lv_label_set_text(save_lbl, "Save");
+  lv_obj_center(save_lbl);
+
+  lv_obj_t *cancel_btn = lv_btn_create(g_pwd_modal);
+  lv_obj_set_size(cancel_btn, 150, 50);
+  lv_obj_align(cancel_btn, LV_ALIGN_TOP_RIGHT, -40, 112);
+  lv_obj_add_event_cb(cancel_btn, handlePasswordCancelTouch, LV_EVENT_CLICKED, NULL);
+  lv_obj_t *cancel_lbl = lv_label_create(cancel_btn);
+  lv_label_set_text(cancel_lbl, "Cancel");
+  lv_obj_center(cancel_lbl);
+
+  g_pwd_keyboard = lv_keyboard_create(g_pwd_modal);
+  lv_obj_set_size(g_pwd_keyboard, DISP_HOR_RES - 220, 320);
+  lv_obj_align(g_pwd_keyboard, LV_ALIGN_BOTTOM_MID, 0, -10);
+  lv_keyboard_set_textarea(g_pwd_keyboard, g_pwd_textarea);
+}
+
+void closePasswordEditorOverlay() {
+  if (g_pwd_modal == nullptr) return;
+  lv_obj_del(g_pwd_modal);
+  g_pwd_modal = nullptr;
+  g_pwd_textarea = nullptr;
+  g_pwd_keyboard = nullptr;
+}
+
+static void handlePasswordButtonTouch(lv_event_t * e) {
+  (void)e;
+  showPasswordEditorOverlay();
+}
+
+static void handlePasswordSaveTouch(lv_event_t * e) {
+  (void)e;
+  if (g_pwd_textarea == nullptr) return;
+
+  const char* entered = lv_textarea_get_text(g_pwd_textarea);
+  if (queueApPasswordUpdate(entered)) {
+    Serial.println("[UI EVENT] AP password update requested from touchscreen.");
+    closePasswordEditorOverlay();
+  } else {
+    Serial.println("[UI EVENT] Invalid AP password. Use 8-63 printable ASCII chars.");
+  }
+}
+
+static void handlePasswordCancelTouch(lv_event_t * e) {
+  (void)e;
+  closePasswordEditorOverlay();
 }
 
 // --- ACTIVE UDS DIAGNOSTIC VIN EXTRACTION ---

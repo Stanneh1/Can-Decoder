@@ -303,8 +303,8 @@ Edit the top of `Audi_S3_8V.ino`:
 #define DISP_VER_RES 720   // Landscape height
 
 // --- WIFI CREDENTIALS (AP MODE) ---
-const char* ap_ssid = "Audi_S3_Telemetry";
-const char* ap_password = "Password123";
+#define AP_SSID "Audi_S3_Telemetry"
+#define AP_PASSWORD_DEFAULT "ChangeMe_S3AP!"
 ```
 
 ### 4. Upload & Test
@@ -581,7 +581,7 @@ Each interpreter's `configureUiLimits()` method sets these values at runtime.
 **WiFi Connection:**
 ```
 SSID:     Audi_S3_Telemetry
-Password: Password123
+Password: Saved AP password (default `ChangeMe_S3AP!`)
 Gateway:  192.168.4.1
 ```
 
@@ -603,7 +603,14 @@ http://192.168.4.1
 - **Endpoint:** `ws://192.168.4.1/ws`
 - **Update Rate:** 10 Hz (100 ms intervals)
 - **Broadcast Mode:** All connected clients receive identical JSON payload
-- **Bidirectional Commands:** `RESET_PEAK` sent from web client to device
+- **Bidirectional Commands:** `RESET_PEAK`, `SET_AP_PASSWORD <new_password>`
+
+### Runtime Password Changes
+
+- **Serial console:** `setpass` (interactive prompt) or `setpass <new_password>`
+- **Web dashboard:** use the **Change AP Password** button in the Diagnostic tab
+- **Touchscreen UI:** use **Set WiFi Password** on the Diagnostic tab
+- New password is validated (8–63 printable ASCII chars), saved to NVS, and applied immediately by restarting the hotspot.
 
 **Telemetry Payload (JSON):**
 ```json
@@ -738,8 +745,8 @@ Can-Decoder/
 
 ### WiFi Credentials
 ```cpp
-const char* ap_ssid = "Audi_S3_Telemetry";
-const char* ap_password = "Password123";
+#define AP_SSID "Audi_S3_Telemetry"
+#define AP_PASSWORD_DEFAULT "ChangeMe_S3AP!"
 ```
 
 ### CAN Bus Baud Rate
