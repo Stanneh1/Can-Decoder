@@ -38,6 +38,14 @@ struct LiveTelemetryMetrics {
     bool driver_door_open = false;
     float target_temp = 0.0;
     uint8_t mmi_key_code = 0x00;
+    // --- Extended telemetry fields ---
+    float vehicle_speed = 0.0;        // km/h, platform-specific speed frame
+    float throttle_pct = 0.0;         // 0–100 %, accelerator pedal position
+    float exterior_temp = 0.0;        // °C, outside ambient temperature
+    bool passenger_door_open = false;
+    bool rear_left_door_open = false;
+    bool rear_right_door_open = false;
+    bool handbrake_active = false;
 };
 
 struct DecodedVehicleMetrics {
