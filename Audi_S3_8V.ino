@@ -405,6 +405,11 @@ bool applyAndPersistApPassword(const char* password, const char* source) {
         return false;
     }
 
+    if (strcmp(g_ap_password, password) == 0) {
+        Serial.printf("[WIFI] %s password is unchanged.\n", source);
+        return true;
+    }
+
     bool save_ok = saveApPasswordToNvs(password);
     if (!save_ok) {
         Serial.println("[WIFI] WARNING: Password applied but could not be saved to NVS.");
@@ -776,6 +781,10 @@ function decodeMmi(code) {
 }
 
 function update(d) {
+    if (d.ok !== undefined && d.msg) {
+        alert(d.msg);
+        return;
+    }
     if (d.car)   document.getElementById('car_banner').textContent = d.car;
     if (d.brand) document.getElementById('dg_brand').textContent   = d.brand;
     if (d.bus)   { document.getElementById('dg_bus').textContent   = d.bus;
@@ -846,8 +855,11 @@ function promptPasswordChange() {
         alert('Password must be 8-63 characters.');
         return;
     }
+    if (!/^[\x20-\x7E]+$/.test(next)) {
+        alert('Password must use printable ASCII characters only.');
+        return;
+    }
     ws.send('SET_AP_PASSWORD ' + next);
-    alert('Password change requested. The hotspot will restart.');
 }
 </script>
 </body>
