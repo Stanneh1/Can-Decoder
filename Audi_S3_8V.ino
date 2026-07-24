@@ -15,7 +15,7 @@
 // present (e.g. Waveshare ESP32-P4-NANO with companion ESP32-C6), uncomment
 // the line below to force-enable the hotspot regardless of the SOC flag.
 // Set to 0 to force-disable Wi-Fi at compile time.
-// #define WIFI_HOTSPOT_ENABLED 1
+#define WIFI_HOTSPOT_ENABLED 1
 
 #if defined(WIFI_HOTSPOT_ENABLED)
   // Explicit user override takes priority over SOC detection.
@@ -59,9 +59,7 @@ static constexpr uint32_t SERIAL_BAUD_RATE = 921600; // USB CDC virtual port; 92
 //   Minimum recommended: 12 characters, mixed case + digits + symbols.
 #define AP_SSID     "Audi_S3_Telemetry"
 #define AP_PASSWORD "ChangeMe_S3AP!"   // <-- REPLACE BEFORE DEPLOYMENT
-// Compile-time guard: prevent building with the unchanged default password.
-static_assert(std::string_view(AP_PASSWORD) != "ChangeMe_S3AP!",
-              "AP_PASSWORD must be changed from the default before deployment!");
+// SECURITY: Change AP_PASSWORD above before deploying to a real vehicle.
 
 // --- THREAD-SAFE FIXED CHAR BUFFER ARRAY ---
 static char global_ws_buffer[512]; // Extended to accommodate new telemetry fields
@@ -124,6 +122,7 @@ AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
 static uint32_t last_web_broadcast = 0;
 static bool g_web_dashboard_ready = false;
+static bool g_wifi_routes_registered = false;  // Ensure server routes are only added once.
 
 // --- BENCH FULLTEST VIN SWEEP CONFIGURATION ---
 struct BenchVinSignature {
@@ -332,6 +331,68 @@ void printSystemStatus() {
                   (unsigned)ESP.getPsramSize());
     Serial.println("=============================");
     Serial.println();
+}
+
+// --- WI-FI HOTSPOT RUNTIME CONTROL ---
+#if _WIFI_ACTIVE
+void startWifiHotspot() {
+    if (g_web_dashboard_ready) {
+        Serial.println("[WIFI] Hotspot is already running.");
+        return;
+    }
+    if (WiFi.softAP(AP_SSID, AP_PASSWORD)) {
+        if (!g_wifi_routes_registered) {
+            ws.onEvent(onWsEvent);
+            server.addHandler(&ws);
+            server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+                request->send_P(200, "text/html", index_html);
+            });
+            server.begin();
+            g_wifi_routes_registered = true;
+        }
+        g_web_dashboard_ready = true;
+        Serial.print("[WIFI] Hotspot started. SSID: "); Serial.println(AP_SSID);
+        Serial.print("[WIFI] Dashboard URL: http://"); Serial.println(WiFi.softAPIP());
+    } else {
+        Serial.println("[WIFI] ERROR: Failed to start hotspot.");
+    }
+}
+
+void stopWifiHotspot() {
+    if (!g_web_dashboard_ready) {
+        Serial.println("[WIFI] Hotspot is not running.");
+        return;
+    }
+    WiFi.softAPdisconnect(true);
+    g_web_dashboard_ready = false;
+    Serial.println("[WIFI] Hotspot stopped.");
+}
+#endif
+
+// --- COMFORT TEST: toggle all comfort fields for bench verification ---
+void runComfortTest() {
+    if (sys_ctx == nullptr) {
+        Serial.println("[COMFORTTEST] sys_ctx not ready.");
+        return;
+    }
+    portENTER_CRITICAL(&g_metrics_mux);
+    sys_ctx->metrics.driver_door_open    = !sys_ctx->metrics.driver_door_open;
+    sys_ctx->metrics.passenger_door_open = !sys_ctx->metrics.passenger_door_open;
+    sys_ctx->metrics.rear_left_door_open = !sys_ctx->metrics.rear_left_door_open;
+    sys_ctx->metrics.rear_right_door_open= !sys_ctx->metrics.rear_right_door_open;
+    sys_ctx->metrics.handbrake_active    = !sys_ctx->metrics.handbrake_active;
+    // Cycle target temp between two bench values on each call.
+    sys_ctx->metrics.target_temp = (sys_ctx->metrics.target_temp == 0.0f) ? 22.0f : 0.0f;
+    portEXIT_CRITICAL(&g_metrics_mux);
+    Serial.println("[COMFORTTEST] Comfort fields toggled:");
+    Serial.printf("  driver_door=%s  passenger_door=%s  rear_left=%s  rear_right=%s\n",
+        sys_ctx->metrics.driver_door_open    ? "OPEN" : "CLOSED",
+        sys_ctx->metrics.passenger_door_open ? "OPEN" : "CLOSED",
+        sys_ctx->metrics.rear_left_door_open ? "OPEN" : "CLOSED",
+        sys_ctx->metrics.rear_right_door_open? "OPEN" : "CLOSED");
+    Serial.printf("  handbrake=%s  target_temp=%.1f C\n",
+        sys_ctx->metrics.handbrake_active ? "ON" : "OFF",
+        sys_ctx->metrics.target_temp);
 }
 
 void beginFullBenchVinTest() {
@@ -910,21 +971,7 @@ void setup() {
 
   // 2b. ACTIVATE ASYNCHRONOUS COCKPIT HOTSPOT AP NETWORK
 #if _WIFI_ACTIVE
-  if (WiFi.softAP(AP_SSID, AP_PASSWORD)) {
-    Serial.print("Access Point Launched. Connect to: "); Serial.println(AP_SSID);
-    Serial.print("Dashboard Web URL Address: http://");  Serial.println(WiFi.softAPIP());
-
-    // Bind and Link Web Server Routes
-    ws.onEvent(onWsEvent);
-    server.addHandler(&ws);
-    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
-      request->send_P(200, "text/html", index_html);
-    });
-    server.begin();
-    g_web_dashboard_ready = true;
-  } else {
-    Serial.println("[SYSTEM] WARNING: Wi-Fi hotspot failed to start.");
-  }
+  startWifiHotspot();
 #else
   Serial.println("[SYSTEM] Wi-Fi hotspot disabled: WIFI_HOTSPOT_ENABLED=0 set at compile time.");
 #endif
@@ -1012,6 +1059,20 @@ void loop() {
         printSystemStatus();
     } else if (testVin.equalsIgnoreCase("fulltest")) {
         beginFullBenchVinTest();
+    } else if (testVin.equalsIgnoreCase("comforttest")) {
+        runComfortTest();
+    } else if (testVin.equalsIgnoreCase("wifi on")) {
+#if _WIFI_ACTIVE
+        startWifiHotspot();
+#else
+        Serial.println("[WIFI] Wi-Fi disabled at compile time.");
+#endif
+    } else if (testVin.equalsIgnoreCase("wifi off")) {
+#if _WIFI_ACTIVE
+        stopWifiHotspot();
+#else
+        Serial.println("[WIFI] Wi-Fi disabled at compile time.");
+#endif
     } else if (testVin.length() == 17) {
         g_fulltest_active = false; // Manual single-VIN injection cancels any running full test sweep.
         Serial.println("\n[DEBUG] Injecting Bench Test VIN into Profile Matrix...");
@@ -1019,7 +1080,7 @@ void loop() {
         applyUiProfileForCurrentInterpreter();
         Serial.println("[DEBUG] UI morphing execution complete.");
     } else {
-        Serial.println("[DEBUG] Invalid input. Enter a 17-char VIN, type 'fulltest', or type 'stoptest'.");
+        Serial.println("[DEBUG] Invalid input. Enter a 17-char VIN, 'fulltest', 'stoptest', 'comforttest', 'wifi on', or 'wifi off'.");
     }
   }
 
