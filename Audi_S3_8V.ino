@@ -202,6 +202,35 @@ void refreshUiProfileIfPending() {
     if (g_interpreter_mutex != NULL) xSemaphoreGive(g_interpreter_mutex);
 }
 
+void revertToGenericVehicleProfile() {
+    if (g_interpreter_mutex != NULL) xSemaphoreTake(g_interpreter_mutex, portMAX_DELAY);
+    active_vehicle_profile = DecodedVehicleMetrics{};
+    if (sys_ctx != nullptr) {
+        if (sys_ctx->interpreter != nullptr) {
+            delete sys_ctx->interpreter;
+            sys_ctx->interpreter = nullptr;
+        }
+        sys_ctx->interpreter = new GenericVehicleInterpreter();
+    }
+    if (g_interpreter_mutex != NULL) xSemaphoreGive(g_interpreter_mutex);
+}
+
+void restoreLiveVehicleIdentity() {
+    Serial.println("[SYSTEM] Re-checking Powertrain Bus for a live VIN...");
+
+    char live_vin[18] = { 0 };
+    if (requestVehicleVIN(live_vin, sizeof(live_vin))) {
+        Serial.print("[SYSTEM] SUCCESS! Detected Car VIN: ");
+        Serial.println(live_vin);
+        decodeAndPrintVehicleIdentity(live_vin);
+    } else {
+        Serial.println("[SYSTEM] WARNING: VIN query timed out. Defaulting to generic layout profiles.");
+        revertToGenericVehicleProfile();
+    }
+
+    applyUiProfileForCurrentInterpreter();
+}
+
 void buildBenchVin(const BenchVinSignature& sig, char year_token, char* out_vin_18) {
     snprintf(out_vin_18, 18, "%sZZZ%s0%cA000000", sig.wmi, sig.chassis, year_token);
 }
@@ -352,6 +381,7 @@ void runFullBenchVinTestStep() {
 
     g_fulltest_active = false;
     Serial.println("\n[FULLTEST] VIN sweep completed.");
+    restoreLiveVehicleIdentity();
 }
 
 
@@ -769,6 +799,7 @@ void loop() {
         } else {
             Serial.println("\n[STOPTEST] No test was running.");
         }
+        restoreLiveVehicleIdentity();
         printSystemStatus();
     } else if (testVin.equalsIgnoreCase("fulltest")) {
         beginFullBenchVinTest();
