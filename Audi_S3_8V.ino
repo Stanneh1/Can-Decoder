@@ -334,11 +334,18 @@ void printSystemStatus() {
 }
 
 // --- WI-FI HOTSPOT RUNTIME CONTROL ---
+// NOTE: startWifiHotspot() and stopWifiHotspot() are only ever called from
+// Core 0 (setup() then loop()), which are sequential, so g_wifi_routes_registered
+// requires no additional synchronisation.
 #if _WIFI_ACTIVE
 void startWifiHotspot() {
     if (g_web_dashboard_ready) {
         Serial.println("[WIFI] Hotspot is already running.");
         return;
+    }
+    // Runtime password safety reminder (replaces the removed compile-time guard).
+    if (strcmp(AP_PASSWORD, "ChangeMe_S3AP!") == 0) {
+        Serial.println("[WIFI] WARNING: AP_PASSWORD is still the default. Change it before deploying to a vehicle!");
     }
     if (WiFi.softAP(AP_SSID, AP_PASSWORD)) {
         if (!g_wifi_routes_registered) {
