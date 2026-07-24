@@ -64,7 +64,7 @@ static_assert(std::string_view(AP_PASSWORD) != "ChangeMe_S3AP!",
               "AP_PASSWORD must be changed from the default before deployment!");
 
 // --- THREAD-SAFE FIXED CHAR BUFFER ARRAY ---
-static char global_ws_buffer[256]; // Allocates a fixed memory space block
+static char global_ws_buffer[512]; // Extended to accommodate new telemetry fields
 // std::atomic<bool> with acquire/release semantics provides the memory-ordering
 // fence needed on RISC-V (ESP32-P4) so the buffer writes are visible to Core 0
 // before it observes the flag as true.  Plain 'volatile' does NOT provide this.
@@ -98,6 +98,13 @@ lv_obj_t *lbl_boost_val;
 lv_obj_t *lbl_temps_val;
 lv_obj_t *label_comfort;
 lv_obj_t *label_infotainment;
+
+// --- EXTENDED UI LABEL POINTERS (new telemetry panels) ---
+lv_obj_t *lbl_speed_val;
+lv_obj_t *lbl_throttle_val;
+lv_obj_t *lbl_comfort_climate;
+lv_obj_t *lbl_infomt_detail;
+lv_obj_t *lbl_diag;
 
 // --- PLACE THIS DIRECTLY INSIDE Audi_S3_8V.ino (Lines 45-55) ---
 LiveTelemetryMetrics s3_live_metrics;
@@ -391,78 +398,262 @@ const char index_html[] PROGMEM = R"rawhtml(
 <html>
 <head>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Audi S3 8V Live Display</title>
+    <title>VAG CAN Decoder</title>
     <style>
-        body { background: #111; color: #fff; font-family: sans-serif; text-align: center; margin: 0; padding: 20px; }
-        .grid { display: flex; flex-wrap: wrap; justify-content: center; gap: 20px; max-width: 1000px; margin: 0 auto; }
-        .card { background: #222; border-radius: 15px; padding: 20px; min-width: 200px; box-shadow: 0 4px 10px rgba(0,0,0,0.5); position: relative; }
-        .value { font-size: 2.5em; font-weight: bold; margin: 10px 0; transition: color 0.2s; }
-        .label { font-size: 0.9em; color: #888; text-transform: uppercase; }
-        .redline { color: #ff3e3e !important; animation: blink 0.3s infinite; }
-        .normal { color: #32c832; }
-        .cool { color: #0096ff; }
-        button { background: #444; color: #fff; border: none; padding: 8px 15px; border-radius: 5px; cursor: pointer; margin-top: 10px; }
-        button:hover { background: #555; }
-        @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+        *{box-sizing:border-box;margin:0;padding:0}
+        body{background:#0d0d0d;color:#eee;font-family:sans-serif;min-height:100vh}
+        header{background:#1a1a1a;padding:12px 20px;display:flex;align-items:center;justify-content:space-between;border-bottom:2px solid #333}
+        header h1{font-size:1.1em;letter-spacing:2px;color:#32c832}
+        #ws_status{font-size:0.75em;padding:4px 10px;border-radius:20px;background:#333;color:#888}
+        #ws_status.connected{background:#1a3a1a;color:#32c832}
+        nav{display:flex;background:#1a1a1a;border-bottom:1px solid #333}
+        nav button{flex:1;padding:14px;background:none;border:none;color:#888;cursor:pointer;font-size:0.9em;letter-spacing:1px;border-bottom:3px solid transparent;transition:all .2s}
+        nav button.active{color:#fff;border-bottom-color:#32c832}
+        nav button:hover{color:#ccc}
+        .tab{display:none;padding:20px;max-width:1200px;margin:0 auto}
+        .tab.active{display:block}
+        .grid{display:flex;flex-wrap:wrap;gap:16px;justify-content:center}
+        .card{background:#1c1c1c;border-radius:12px;padding:18px 22px;min-width:160px;text-align:center;box-shadow:0 4px 12px rgba(0,0,0,.6)}
+        .card .lbl{font-size:0.72em;color:#666;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px}
+        .card .val{font-size:2.4em;font-weight:700;transition:color .2s}
+        .card .unit{font-size:0.75em;color:#555;margin-top:4px}
+        .green{color:#32c832}.blue{color:#0096ff}.red{color:#ff3e3e}.white{color:#fff}.amber{color:#f0a000}
+        @keyframes blink{0%,100%{opacity:1}50%{opacity:.45}}
+        .blink{animation:blink .35s infinite}
+        button.action{background:#2a2a2a;color:#ccc;border:1px solid #444;padding:7px 14px;border-radius:6px;cursor:pointer;margin-top:10px;font-size:0.8em}
+        button.action:hover{background:#333}
+        /* Door grid */
+        .door-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;max-width:480px;margin:0 auto}
+        .door-cell{background:#222;border-radius:10px;padding:16px 12px;text-align:center;border:2px solid #333;transition:background .3s,border-color .3s}
+        .door-cell.open{background:#3a1a00;border-color:#f0a000}
+        .door-cell .door-icon{font-size:2em}
+        .door-cell .door-lbl{font-size:0.7em;color:#888;margin-top:4px;letter-spacing:1px}
+        .door-cell .door-state{font-size:1em;font-weight:700;margin-top:4px}
+        .door-cell.open .door-state{color:#f0a000}
+        .door-cell:not(.open) .door-state{color:#32c832}
+        /* Diagnostic table */
+        table{width:100%;border-collapse:collapse;font-size:0.9em}
+        td{padding:10px 14px;border-bottom:1px solid #2a2a2a}
+        td:first-child{color:#666;width:40%}
+        td:last-child{font-weight:600;color:#eee}
     </style>
 </head>
 <body>
-    <h1 id="car_banner">VAG MQB TELEMETRY LINK</h1>
-    <div class="grid">
-        <div class="card"><div class="label">Engine Speed</div><div id="rpm" class="value normal">0</div><div class="label">RPM</div></div>
-        <div class="card"><div class="label">Turbo Boost</div><div id="boost" class="value normal">0.00</div><div class="label">Bar</div><button onclick="resetPeak()">Reset Peak (<span id="peak">0.00</span>)</button></div>
-        <div class="card"><div class="label">Engine Oil</div><div id="oil" class="value cool">0</div><div class="label">&deg;C</div></div>
-        <div class="card"><div class="label">Coolant Temp</div><div id="coolant" class="value cool">0</div><div class="label">&deg;C</div></div>
+<header>
+    <h1 id="car_banner">VAG CAN DECODER</h1>
+    <span id="ws_status">CONNECTING...</span>
+</header>
+<nav>
+    <button class="active" onclick="showTab('perf',this)">PERFORMANCE</button>
+    <button onclick="showTab('comfort',this)">COMFORT</button>
+    <button onclick="showTab('info',this)">INFOTAINMENT</button>
+    <button onclick="showTab('diag',this)">DIAGNOSTIC</button>
+</nav>
+
+<!-- TAB 1: PERFORMANCE -->
+<div id="perf" class="tab active">
+<div class="grid">
+    <div class="card">
+        <div class="lbl">Engine Speed</div>
+        <div id="rpm" class="val green">0</div>
+        <div class="unit">RPM</div>
     </div>
-    <script>
-        var gateway = `ws://${window.location.hostname}/ws`;
-        var websocket;
-        
-        window.addEventListener('load', initWebSocket);
+    <div class="card">
+        <div class="lbl">Vehicle Speed</div>
+        <div id="spd" class="val white">0</div>
+        <div class="unit">km/h</div>
+    </div>
+    <div class="card">
+        <div class="lbl">Turbo Boost</div>
+        <div id="boost" class="val green">0.00</div>
+        <div class="unit">Bar</div>
+        <button class="action" onclick="resetPeak()">Reset Peak (<span id="peak">0.00</span>)</button>
+    </div>
+    <div class="card">
+        <div class="lbl">Throttle</div>
+        <div id="thr" class="val white">0</div>
+        <div class="unit">%</div>
+    </div>
+    <div class="card">
+        <div class="lbl">Engine Oil</div>
+        <div id="oil" class="val blue">0</div>
+        <div class="unit">&deg;C</div>
+    </div>
+    <div class="card">
+        <div class="lbl">Coolant Temp</div>
+        <div id="coolant" class="val blue">0</div>
+        <div class="unit">&deg;C</div>
+    </div>
+</div>
+</div>
 
-        function initWebSocket() {
-            console.log("Attempting WebSocket linkage...");
-            websocket = new WebSocket(gateway);
-            websocket.onopen = onOpen;
-            websocket.onclose = onClose;
-            websocket.onmessage = onMessage;
-        }
+<!-- TAB 2: COMFORT -->
+<div id="comfort" class="tab">
+<div class="grid" style="margin-bottom:24px">
+    <div class="card">
+        <div class="lbl">Exterior Temp</div>
+        <div id="ext" class="val blue">0</div>
+        <div class="unit">&deg;C</div>
+    </div>
+    <div class="card">
+        <div class="lbl">Target Climate</div>
+        <div id="tgt" class="val white">0</div>
+        <div class="unit">&deg;C</div>
+    </div>
+    <div class="card">
+        <div class="lbl">Handbrake</div>
+        <div id="hb" class="val green">OFF</div>
+    </div>
+</div>
+<div class="door-grid">
+    <div class="door-cell" id="dc_dd">
+        <div class="door-icon">&#x1F6AA;</div>
+        <div class="door-lbl">DRIVER</div>
+        <div class="door-state" id="ds_dd">CLOSED</div>
+    </div>
+    <div class="door-cell" id="dc_pd">
+        <div class="door-icon">&#x1F6AA;</div>
+        <div class="door-lbl">PASSENGER</div>
+        <div class="door-state" id="ds_pd">CLOSED</div>
+    </div>
+    <div class="door-cell" id="dc_rld">
+        <div class="door-icon">&#x1F6AA;</div>
+        <div class="door-lbl">REAR LEFT</div>
+        <div class="door-state" id="ds_rld">CLOSED</div>
+    </div>
+    <div class="door-cell" id="dc_rrd">
+        <div class="door-icon">&#x1F6AA;</div>
+        <div class="door-lbl">REAR RIGHT</div>
+        <div class="door-state" id="ds_rrd">CLOSED</div>
+    </div>
+</div>
+</div>
 
-        function onOpen(event) {
-            console.log("WebSocket Connection Verified OPEN.");
-        }
+<!-- TAB 3: INFOTAINMENT -->
+<div id="info" class="tab">
+<div class="grid">
+    <div class="card" style="min-width:300px">
+        <div class="lbl">MMI Key Input</div>
+        <div id="mmi_hex" class="val white">0x00</div>
+        <div id="mmi_name" class="unit" style="font-size:1.1em;color:#f0a000;margin-top:8px">IDLE</div>
+    </div>
+    <div class="card" style="min-width:260px">
+        <div class="lbl">Electrical Bus</div>
+        <div id="bus" class="val white" style="font-size:1.4em">---</div>
+    </div>
+</div>
+</div>
 
-        function onClose(event) {
-            console.log("Connection closed abnormally. Re-linking in 2 seconds...");
-            setTimeout(initWebSocket, 2000); // Auto-reconnect safety loop
-        }
+<!-- TAB 4: DIAGNOSTIC -->
+<div id="diag" class="tab">
+<div class="card" style="max-width:600px;margin:0 auto;text-align:left">
+<table>
+    <tr><td>Brand</td><td id="dg_brand">---</td></tr>
+    <tr><td>Model</td><td id="dg_car">---</td></tr>
+    <tr><td>Bus Platform</td><td id="dg_bus">---</td></tr>
+    <tr><td>Production Year</td><td id="dg_year">---</td></tr>
+    <tr><td>WebSocket</td><td id="dg_ws">CONNECTING</td></tr>
+</table>
+</div>
+</div>
 
-        function onMessage(event) {
-            try {
-                var data = JSON.parse(event.data);
-                if(data.car) document.getElementById('car_banner').innerText = data.car;
-                document.getElementById('rpm').innerText = data.rpm.toFixed(0);
-                document.getElementById('rpm').className = (data.rpm >= 6500) ? "value redline" : "value normal";
-                document.getElementById('boost').innerText = data.boost.toFixed(2);
-                document.getElementById('peak').innerText = data.peak.toFixed(2);
-                document.getElementById('oil').innerText = data.oil;
-                document.getElementById('oil').className = (data.oil < 75) ? "value cool" : ((data.oil <= 115) ? "value normal" : "value redline");
-                document.getElementById('coolant').innerText = data.h2o;
-                document.getElementById('coolant').className = (data.h2o < 70) ? "value cool" : ((data.h2o <= 105) ? "value normal" : "value redline");
-            } catch(e) {
-                console.error("Data packet format error", e);
-            }
-        }
+<script>
+var gw = `ws://${window.location.hostname}/ws`;
+var ws;
+window.addEventListener('load', connect);
 
-        function resetPeak() { 
-            // FIX: Gated check to ensure the channel state is fully open before sending strings
-            if (websocket && websocket.readyState === WebSocket.OPEN) {
-                websocket.send("RESET_PEAK"); 
-            } else {
-                console.warn("Touch ignored: WebSocket is still initializing link state.");
-            }
-        }
-    </script>
+function connect() {
+    ws = new WebSocket(gw);
+    ws.onopen  = function() { setStatus(true); };
+    ws.onclose = function() { setStatus(false); setTimeout(connect, 2000); };
+    ws.onmessage = function(e) {
+        try { update(JSON.parse(e.data)); } catch(x) { console.error(x); }
+    };
+}
+
+function setStatus(ok) {
+    var el = document.getElementById('ws_status');
+    el.textContent = ok ? 'LIVE' : 'RECONNECTING...';
+    el.className = ok ? 'connected' : '';
+    document.getElementById('dg_ws').textContent = ok ? 'CONNECTED' : 'DISCONNECTED';
+}
+
+function colorTemp(v, cold, hot) {
+    if (v < cold) return 'blue';
+    if (v > hot)  return 'red blink';
+    return 'green';
+}
+
+function doorCell(cellId, stateId, open) {
+    document.getElementById(cellId).className = 'door-cell' + (open ? ' open' : '');
+    document.getElementById(stateId).textContent = open ? 'OPEN' : 'CLOSED';
+}
+
+function decodeMmi(code) {
+    var map = {0x00:'IDLE',0x01:'VOL+',0x81:'VOL-',0x02:'TRACK+',0x82:'TRACK-',
+               0x04:'MUTE',0x08:'MEDIA',0x10:'NAV',0x20:'PHONE',0x40:'VOICE'};
+    return map[code] !== undefined ? map[code] : 'UNKNOWN';
+}
+
+function update(d) {
+    if (d.car)   document.getElementById('car_banner').textContent = d.car;
+    if (d.brand) document.getElementById('dg_brand').textContent   = d.brand;
+    if (d.bus)   { document.getElementById('dg_bus').textContent   = d.bus;
+                   document.getElementById('bus').textContent       = d.bus; }
+    if (d.year)  document.getElementById('dg_year').textContent    = d.year;
+    if (d.car)   document.getElementById('dg_car').textContent     = d.car;
+
+    // Performance
+    var rpm = d.rpm||0;
+    var rpmEl = document.getElementById('rpm');
+    rpmEl.textContent = rpm.toFixed(0);
+    rpmEl.className = 'val ' + (rpm >= 6500 ? 'red blink' : 'green');
+
+    document.getElementById('spd').textContent   = (d.spd||0).toFixed(1);
+    document.getElementById('thr').textContent   = (d.thr||0).toFixed(0);
+
+    var bEl = document.getElementById('boost');
+    bEl.textContent = (d.boost||0).toFixed(2);
+    bEl.className = 'val ' + ((d.boost||0) > 1.8 ? 'red' : 'green');
+    document.getElementById('peak').textContent  = (d.peak||0).toFixed(2);
+
+    var oEl = document.getElementById('oil');
+    oEl.textContent = d.oil||0;
+    oEl.className = 'val ' + colorTemp(d.oil||0, 75, 115);
+
+    var cEl = document.getElementById('coolant');
+    cEl.textContent = d.h2o||0;
+    cEl.className = 'val ' + colorTemp(d.h2o||0, 70, 105);
+
+    // Comfort
+    document.getElementById('ext').textContent = (d.ext||0).toFixed(1);
+    document.getElementById('ext').className   = 'val ' + ((d.ext||0) < 3 ? 'blue' : 'white');
+    document.getElementById('tgt').textContent = (d.tgt||0).toFixed(1);
+    var hbEl = document.getElementById('hb');
+    hbEl.textContent = d.hb ? 'ON' : 'OFF';
+    hbEl.className = 'val ' + (d.hb ? 'amber' : 'green');
+    doorCell('dc_dd',  'ds_dd',  d.dd);
+    doorCell('dc_pd',  'ds_pd',  d.pd);
+    doorCell('dc_rld', 'ds_rld', d.rld);
+    doorCell('dc_rrd', 'ds_rrd', d.rrd);
+
+    // Infotainment
+    var mmi = d.mmi||0;
+    document.getElementById('mmi_hex').textContent  = '0x'+mmi.toString(16).toUpperCase().padStart(2,'0');
+    document.getElementById('mmi_name').textContent = decodeMmi(mmi);
+}
+
+function showTab(id, btn) {
+    document.querySelectorAll('.tab').forEach(function(t){ t.classList.remove('active'); });
+    document.querySelectorAll('nav button').forEach(function(b){ b.classList.remove('active'); });
+    document.getElementById(id).classList.add('active');
+    btn.classList.add('active');
+}
+
+function resetPeak() {
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send('RESET_PEAK');
+}
+</script>
 </body>
 </html>
 )rawhtml";
@@ -599,12 +790,17 @@ void CockpitCoreProcessor(void *pvParameters) {
         m_snap = sys_ctx->metrics;
         portEXIT_CRITICAL(&g_metrics_mux);
 
-        // H-3: Read model_name pointer under the interpreter mutex so we never
-        //      observe a partially-written pointer during VIN decode on Core 0.
-        const char* car_name = "GENERIC";
+        // H-3: Read vehicle profile fields under the interpreter mutex.
+        const char* car_name  = "GENERIC";
+        const char* car_brand = "GENERIC";
+        const char* car_bus   = "---";
+        uint16_t    car_year  = 0;
         if (g_interpreter_mutex != NULL) {
           xSemaphoreTake(g_interpreter_mutex, portMAX_DELAY);
-          car_name = active_vehicle_profile.model_name;
+          car_name  = active_vehicle_profile.model_name;
+          car_brand = active_vehicle_profile.brand;
+          car_bus   = active_vehicle_profile.electrical_bus;
+          car_year  = active_vehicle_profile.production_year;
           xSemaphoreGive(g_interpreter_mutex);
         }
 
@@ -614,6 +810,19 @@ void CockpitCoreProcessor(void *pvParameters) {
         doc["oil"]   = m_snap.oil_temp;
         doc["h2o"]   = m_snap.coolant_temp;
         doc["car"]   = car_name;
+        doc["brand"] = car_brand;
+        doc["bus"]   = car_bus;
+        doc["year"]  = car_year;
+        doc["spd"]   = m_snap.vehicle_speed;
+        doc["thr"]   = m_snap.throttle_pct;
+        doc["ext"]   = m_snap.exterior_temp;
+        doc["dd"]    = m_snap.driver_door_open;
+        doc["pd"]    = m_snap.passenger_door_open;
+        doc["rld"]   = m_snap.rear_left_door_open;
+        doc["rrd"]   = m_snap.rear_right_door_open;
+        doc["hb"]    = m_snap.handbrake_active;
+        doc["mmi"]   = m_snap.mmi_key_code;
+        doc["tgt"]   = m_snap.target_temp;
         
         serializeJson(doc, global_ws_buffer, sizeof(global_ws_buffer));
         
@@ -852,22 +1061,24 @@ void loop() {
 // RADIAL DASHBOARD CONTEXT MATRIX (LVGL ENGINE BUILD)
 // -------------------------------------------------------------
 void buildCockpitUI() {
-  // Construct Master Tabview Environment using pointer arrows
-  sys_ctx->tv = lv_tabview_create(lv_scr_act(), LV_DIR_TOP, 0);
+  // Tab bar visible at 50px so users can tap to switch tabs
+  sys_ctx->tv = lv_tabview_create(lv_scr_act(), LV_DIR_TOP, 50);
   lv_obj_t *t1 = lv_tabview_add_tab(sys_ctx->tv, "PERFORMANCE");
-  lv_obj_t *t2 = lv_tabview_add_tab(sys_ctx->tv, "CONVENIENCE");
+  lv_obj_t *t2 = lv_tabview_add_tab(sys_ctx->tv, "COMFORT");
   lv_obj_t *t3 = lv_tabview_add_tab(sys_ctx->tv, "INFOTAINMENT");
+  lv_obj_t *t4 = lv_tabview_add_tab(sys_ctx->tv, "DIAGNOSTIC");
 
   // Style overall dashboard black background matrix
   lv_obj_set_style_bg_color(lv_scr_act(), lv_color_black(), 0);
   lv_obj_set_style_bg_color(t1, lv_color_black(), 0);
   lv_obj_set_style_bg_color(t2, lv_color_black(), 0);
   lv_obj_set_style_bg_color(t3, lv_color_black(), 0);
+  lv_obj_set_style_bg_color(t4, lv_color_black(), 0);
 
   // =========================================================================
-  // TAB 1: RADIAL INSTRUMENTS & DIALS
+  // TAB 1: RADIAL INSTRUMENTS & DIALS + SPEED / THROTTLE
   // =========================================================================
-  
+
   // Allocate Engine Tachometer to Context Pointer
   sys_ctx->rpm_meter = lv_arc_create(t1);
   lv_obj_set_size(sys_ctx->rpm_meter, 220, 220);
@@ -880,7 +1091,7 @@ void buildCockpitUI() {
   sys_ctx->boost_meter = lv_bar_create(t1);
   lv_obj_set_size(sys_ctx->boost_meter, 30, 160);
   lv_obj_align(sys_ctx->boost_meter, LV_ALIGN_RIGHT_MID, -140, -20);
-  
+
   // Allocate Thermal Arcs to Context Pointers
   sys_ctx->oil_arc = lv_arc_create(t1);
   lv_obj_set_size(sys_ctx->oil_arc, 90, 90);
@@ -909,20 +1120,48 @@ void buildCockpitUI() {
   lv_obj_align(lbl_temps_val, LV_ALIGN_RIGHT_MID, -10, -5);
   lv_obj_set_style_text_color(lbl_temps_val, lv_color_white(), 0);
 
+  // Vehicle speed readout (centre-left, below tachometer)
+  lbl_speed_val = lv_label_create(t1);
+  lv_obj_align(lbl_speed_val, LV_ALIGN_CENTER, -90, 30);
+  lv_obj_set_style_text_color(lbl_speed_val, lv_color_white(), 0);
+
+  // Throttle position readout (below speed)
+  lbl_throttle_val = lv_label_create(t1);
+  lv_obj_align(lbl_throttle_val, LV_ALIGN_CENTER, -90, 65);
+  lv_obj_set_style_text_color(lbl_throttle_val, lv_color_white(), 0);
+
   // Add Interactive Touch Handler Reset Hook for Peak Value
   lv_obj_add_flag(sys_ctx->boost_meter, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_add_event_cb(sys_ctx->boost_meter, handleBoostResetTouch, LV_EVENT_CLICKED, NULL);
 
   // =========================================================================
-  // TAB 2 & TAB 3: CONVENIENCE AND INFOTAINMENT READOUT LABELS
+  // TAB 2: COMFORT — DOOR STATUS, HANDBRAKE, CLIMATE
   // =========================================================================
   label_comfort = lv_label_create(t2);
-  lv_obj_align(label_comfort, LV_ALIGN_CENTER, 0, 0);
+  lv_obj_align(label_comfort, LV_ALIGN_TOP_LEFT, 20, 20);
   lv_obj_set_style_text_color(label_comfort, lv_color_white(), 0);
 
+  lbl_comfort_climate = lv_label_create(t2);
+  lv_obj_align(lbl_comfort_climate, LV_ALIGN_TOP_LEFT, 20, 200);
+  lv_obj_set_style_text_color(lbl_comfort_climate, lv_color_white(), 0);
+
+  // =========================================================================
+  // TAB 3: INFOTAINMENT — DECODED MMI + PLATFORM INFO
+  // =========================================================================
   label_infotainment = lv_label_create(t3);
-  lv_obj_align(label_infotainment, LV_ALIGN_CENTER, 0, 0);
+  lv_obj_align(label_infotainment, LV_ALIGN_TOP_LEFT, 20, 20);
   lv_obj_set_style_text_color(label_infotainment, lv_color_white(), 0);
+
+  lbl_infomt_detail = lv_label_create(t3);
+  lv_obj_align(lbl_infomt_detail, LV_ALIGN_TOP_LEFT, 20, 110);
+  lv_obj_set_style_text_color(lbl_infomt_detail, lv_color_white(), 0);
+
+  // =========================================================================
+  // TAB 4: DIAGNOSTIC — VEHICLE IDENTITY + SYSTEM HEALTH
+  // =========================================================================
+  lbl_diag = lv_label_create(t4);
+  lv_obj_align(lbl_diag, LV_ALIGN_TOP_LEFT, 20, 20);
+  lv_obj_set_style_text_color(lbl_diag, lv_color_white(), 0);
 
   // =========================================================================
   // DYNAMIC ARCHITECTURE LOOKUP IMPLEMENTATION
@@ -936,8 +1175,30 @@ void buildCockpitUI() {
 // -------------------------------------------------------------
 // METRIC EXTRACTION REDRAW LOGIC CYCLE
 // -------------------------------------------------------------
+
+// Rate-limit counters for expensive diagnostic panel refresh
+static uint32_t ui_last_info_refresh = 0;
+static uint32_t ui_last_diag_refresh = 0;
+
+// Helper: decode MMI rotary key code to a human-readable action string
+static const char* decodeMmiKey(uint8_t code) {
+  switch (code) {
+    case 0x01: return "VOL+";
+    case 0x81: return "VOL-";
+    case 0x02: return "TRACK+";
+    case 0x82: return "TRACK-";
+    case 0x04: return "MUTE";
+    case 0x08: return "MEDIA";
+    case 0x10: return "NAV";
+    case 0x20: return "PHONE";
+    case 0x40: return "VOICE";
+    case 0x00: return "IDLE";
+    default:   return "UNKNOWN";
+  }
+}
+
 void updateUIElements() {
-  char buf[32];
+  char buf[64];
 
   // C-4: Snapshot the entire metrics struct under the spinlock so we never
   //      observe a torn value from Core 0's runBenchTelemetrySimulation.
@@ -975,13 +1236,82 @@ void updateUIElements() {
   snprintf(buf, sizeof(buf), "OIL: %.0f C\nH2O: %.0f C", m.oil_temp, m.coolant_temp);
   lv_label_set_text(lbl_temps_val, buf);
 
-  // 4. Update Peripheral Text Containers
-  snprintf(buf, sizeof(buf), "DRV DOOR: %s  |  TGT: %.1f C", 
-           m.driver_door_open ? "OPEN" : "CLOSED", m.target_temp);
-  lv_label_set_text(label_comfort, buf);
+  // 4. Speed and throttle readouts (Tab 1)
+  snprintf(buf, sizeof(buf), "SPD: %.1f km/h", m.vehicle_speed);
+  lv_label_set_text(lbl_speed_val, buf);
 
-  snprintf(buf, sizeof(buf), "MMI VOL WHEEL HEX INPUT VECTOR: 0x%02X", m.mmi_key_code);
+  snprintf(buf, sizeof(buf), "THR: %.0f%%", m.throttle_pct);
+  lv_label_set_text(lbl_throttle_val, buf);
+
+  // 5. Comfort tab — door grid + handbrake + target temp (Tab 2)
+  char comfort_buf[192];
+  snprintf(comfort_buf, sizeof(comfort_buf),
+    "DRIVER:    %s\n"
+    "PASSENGER: %s\n"
+    "REAR LEFT: %s\n"
+    "REAR RIGHT:%s\n"
+    "HANDBRAKE: %s\n"
+    "TGT TEMP:  %.1f C",
+    m.driver_door_open    ? "OPEN" : "CLOSED",
+    m.passenger_door_open ? "OPEN" : "CLOSED",
+    m.rear_left_door_open ? "OPEN" : "CLOSED",
+    m.rear_right_door_open? "OPEN" : "CLOSED",
+    m.handbrake_active    ? "ON"   : "OFF",
+    m.target_temp);
+  lv_label_set_text(label_comfort, comfort_buf);
+
+  snprintf(buf, sizeof(buf), "EXT TEMP: %.1f C", m.exterior_temp);
+  lv_label_set_text(lbl_comfort_climate, buf);
+
+  // 6. Infotainment tab — decoded MMI + rate-limited platform info (Tab 3)
+  snprintf(buf, sizeof(buf), "MMI: 0x%02X  [%s]", m.mmi_key_code, decodeMmiKey(m.mmi_key_code));
   lv_label_set_text(label_infotainment, buf);
+
+  uint32_t now = millis();
+  if (now - ui_last_info_refresh >= 2000) {
+    ui_last_info_refresh = now;
+    char info_buf[128];
+    // Read model name under interpreter mutex (non-blocking trylock — skip if busy)
+    if (xSemaphoreTake(g_interpreter_mutex, 0) == pdTRUE) {
+      const char *mdl  = active_vehicle_profile.model_name[0] ? active_vehicle_profile.model_name : "UNKNOWN";
+      const char *bus  = active_vehicle_profile.electrical_bus[0] ? active_vehicle_profile.electrical_bus : "---";
+      snprintf(info_buf, sizeof(info_buf), "MODEL: %s\nBUS:   %s", mdl, bus);
+      xSemaphoreGive(g_interpreter_mutex);
+    } else {
+      snprintf(info_buf, sizeof(info_buf), "MODEL: (updating)\nBUS:   ---");
+    }
+    lv_label_set_text(lbl_infomt_detail, info_buf);
+  }
+
+  // 7. Diagnostic tab — vehicle identity + heap stats (Tab 4, rate-limited 5 s)
+  if (now - ui_last_diag_refresh >= 5000) {
+    ui_last_diag_refresh = now;
+    char diag_buf[256];
+    uint32_t heap  = ESP.getFreeHeap();
+    uint32_t psram = ESP.getFreePsram();
+    uint32_t up    = millis() / 1000;
+    if (xSemaphoreTake(g_interpreter_mutex, 0) == pdTRUE) {
+      const char *brand = active_vehicle_profile.brand[0] ? active_vehicle_profile.brand : "GENERIC";
+      const char *mdl   = active_vehicle_profile.model_name[0] ? active_vehicle_profile.model_name : "UNKNOWN";
+      const char *bus   = active_vehicle_profile.electrical_bus[0] ? active_vehicle_profile.electrical_bus : "---";
+      uint16_t    yr    = active_vehicle_profile.production_year;
+      snprintf(diag_buf, sizeof(diag_buf),
+        "BRAND:  %s\n"
+        "MODEL:  %s\n"
+        "BUS:    %s\n"
+        "YEAR:   %u\n"
+        "HEAP:   %lu B\n"
+        "PSRAM:  %lu B\n"
+        "UPTIME: %lus",
+        brand, mdl, bus, yr, heap, psram, (unsigned long)up);
+      xSemaphoreGive(g_interpreter_mutex);
+    } else {
+      snprintf(diag_buf, sizeof(diag_buf),
+        "HEAP:   %lu B\nPSRAM:  %lu B\nUPTIME: %lus",
+        heap, psram, (unsigned long)up);
+    }
+    lv_label_set_text(lbl_diag, diag_buf);
+  }
 }
 
 // Remote touch data receiver
