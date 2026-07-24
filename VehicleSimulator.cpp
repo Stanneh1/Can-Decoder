@@ -96,7 +96,8 @@ void runBenchTelemetrySimulation(float target_rpm, float target_boost, float tar
             // M-2: Clamp to uint8_t range to prevent overflow above ~1.4 Bar.
             tx_msg.identifier = 0x380;
             int absolute_mbar = (int)((target_boost * 1000.0) + 1013.0);
-            *(tx_msg.data + 0) = (uint8_t)((absolute_mbar / 10) > 255 ? 255 : (absolute_mbar / 10));
+            int raw_mbar_clamped = absolute_mbar / 10;
+            *(tx_msg.data + 0) = (uint8_t)(raw_mbar_clamped > 255 ? 255 : raw_mbar_clamped);
             for(int i = 1; i < 8; i++) *(tx_msg.data + i) = 0x00;
             twai_transmit_v2(*(twai_ports + 0), &tx_msg, 0);
 
